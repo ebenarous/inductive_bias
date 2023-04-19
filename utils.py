@@ -61,6 +61,11 @@ def find_overlap(l1:list, l2:list):
 
     return overlap
 
+
+def remove_int(s):
+    return s.rstrip('0123456789')
+
+
 def visualize(table, models, save=False, pre_data='cifar'):
     
     print('\nFirst 5 logged epochs:\n', table.T.head())
@@ -68,7 +73,7 @@ def visualize(table, models, save=False, pre_data='cifar'):
 
     for model in models:
         data = table.loc[model]
-        x = table.loc[model].index
+        x = data.index
 
         if pre_data == 'noise':
             # Separate bias_%, down_acc, pair_e_dist
@@ -76,9 +81,9 @@ def visualize(table, models, save=False, pre_data='cifar'):
             bias, down, pair_dist = data_np[:, 0], data_np[:, 1], data_np[:, 2]
 
             # Save each independently
-            pd.DataFrame(bias).to_excel(os.path.join('scores', f'{model}'+'bias_scores.xlsx'))
-            pd.DataFrame(down).to_excel(os.path.join('scores', f'{model}'+'down_scores.xlsx'))
-            pd.DataFrame(pair_dist).to_excel(os.path.join('scores', f'{model}'+'pair_dist_scores.xlsx'))
+            pd.DataFrame(bias).to_excel(os.path.join('scores', f'{model}'+'__bias_scores.xlsx'))
+            pd.DataFrame(down).to_excel(os.path.join('scores', f'{model}'+'__down_scores.xlsx'))
+            pd.DataFrame(pair_dist).to_excel(os.path.join('scores', f'{model}'+'__pair_dist_scores.xlsx'))
 
             # Plot evolutions
             fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(14,6))
@@ -90,7 +95,7 @@ def visualize(table, models, save=False, pre_data='cifar'):
             ax1.set_xlabel('Epochs')
 
             ax2.plot(x, down)
-            ax2.set_title('Downstream task test accuracy')
+            ax2.set_title('Downstream test accuracy')
             ax2.set_ylabel('Accuracy (%)')
             ax2.set_xlabel('Epochs')
 
@@ -101,7 +106,7 @@ def visualize(table, models, save=False, pre_data='cifar'):
 
             fig.tight_layout()
             # subplots_adjust(hspace=1.0, wspace=1.0)
-            if save: plt.savefig('Results_{}.png'.format(model), dpi=300)
+            if save: plt.savefig(os.path.join('scores', 'Results_{}.png'.format(model)), dpi=300)
             plt.show()
 
 
@@ -111,31 +116,31 @@ def visualize(table, models, save=False, pre_data='cifar'):
             pre, bias, down, pair_dist = data_np[:, 0], data_np[:, 1], data_np[:, 2], data_np[:, 3]
 
             # Save each independently
-            pd.DataFrame(pre).to_excel(os.path.join('scores', f'{model}'+'pre_scores.xlsx'))
-            pd.DataFrame(bias).to_excel(os.path.join('scores', f'{model}'+'bias_scores.xlsx'))
-            pd.DataFrame(down).to_excel(os.path.join('scores', f'{model}'+'down_scores.xlsx'))
-            pd.DataFrame(pair_dist).to_excel(os.path.join('scores', f'{model}'+'pair_dist_scores.xlsx'))
+            pd.DataFrame(pre).to_excel(os.path.join('scores', f'{model}'+'__pre_scores.xlsx'))
+            pd.DataFrame(bias).to_excel(os.path.join('scores', f'{model}'+'__bias_scores.xlsx'))
+            pd.DataFrame(down).to_excel(os.path.join('scores', f'{model}'+'__down_scores.xlsx'))
+            pd.DataFrame(pair_dist).to_excel(os.path.join('scores', f'{model}'+'__pair_dist_scores.xlsx'))
 
             # Plot evolutions
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14,6))
             fig.suptitle('Evolution of scores for {} throughout training'.format(model), fontsize=18)
             
             ax1.plot(x, pre)
-            ax1.set_title('Pretext task test accuracy')
+            ax1.set_title('Pretext test accuracy')
             ax1.set_ylabel('Accuracy (%)')
             ax1.set_xlabel('Epochs')
 
             ax2.plot(x, bias)
-            ax2.set_title('Bias percentage')
+            ax2.set_title('Shape bias')
             ax2.set_ylabel('Percentage (%)')
             ax2.set_xlabel('Epochs')
 
 
             fig2, (ax3, ax4) = plt.subplots(1, 2, figsize=(14,6))
-            fig.suptitle('Evolution of scores for {} throughout training'.format(model), fontsize=18)
+            fig2.suptitle('Evolution of scores for {} throughout training'.format(model), fontsize=18)
             
             ax3.plot(x, down)
-            ax3.set_title('Downstream task test accuracy')
+            ax3.set_title('Downstream test accuracy')
             ax3.set_ylabel('Accuracy (%)')
             ax3.set_xlabel('Epochs')
 
@@ -147,6 +152,7 @@ def visualize(table, models, save=False, pre_data='cifar'):
             fig.tight_layout()
             fig2.tight_layout()
             if save: 
-                fig.savefig('Results_1_{}.png'.format(model), dpi=300)
-                fig2.savefig('Results_2_{}.png'.format(model), dpi=300)
+                fig.savefig(os.path.join('scores', 'Results_1_{}.png'.format(model)), dpi=300)
+                fig2.savefig(os.path.join('scores', 'Results_2_{}.png'.format(model)), dpi=300)
             plt.show()
+
