@@ -1014,25 +1014,66 @@ dict = {0: 'tench, Tinca tinca',
     
 
 class ContrastiveTransformations:
-    def __init__(self, base_transforms, n_views=2):
+    def __init__(self, base_transforms, n_views=2, spe_transforms=None):
         self.base_transforms = base_transforms
         self.n_views = n_views
+        self.spe_transforms = spe_transforms
 
     def __call__(self, x):
-        return [self.base_transforms(x) for i in range(self.n_views)]
+        if self.spe_transforms is None: return [self.base_transforms(x) for i in range(self.n_views)] # return n_views versions of an image following base_transforms
+        else: return [self.base_transforms(x), self.spe_transforms(x)] # return only pair of [base_transforms, specific_transforms] augmented image
 
-def simclr_aug(size):
-    # TODO: are the normalize values always like this?
-    return [transforms.RandomHorizontalFlip(),
-            transforms.RandomResizedCrop(size=size),
-            transforms.RandomApply([transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.1)], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.GaussianBlur(kernel_size=9),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,)),]
+def simclr_aug(size, *args, norm):
+    '''
+    args of form:  (aug1, p1), (aug2, p2), (aug3, p3), ... 
+    Note - RandomResizedCrop & GaussianBlur do not have p as parameter, must pass:  (aug, None)
+    Possible examples:
+        (hflip, p)
+        (crop, None)
+        (c_jitter, p)
+        (gray, p)
+        (g_blur, None)
+    '''
+    # Return standard simCLR augmentations
+    if not args:
 
-def load_data(dataset, bs=64, stage='pre', finetune=False, n_views=1,
-              path=None, resize_image=False, shuffle_noise=True, random_seed=42):
+        return [transforms.RandomHorizontalFlip(),
+                transforms.RandomResizedCrop(size=size),
+                transforms.RandomApply([transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.1)], p=0.8),
+                transforms.RandomGrayscale(p=0.2),
+                transforms.GaussianBlur(kernel_size=9),
+                transforms.ToTensor(),
+                transforms.Normalize(norm[0], norm[1]),]
+   
+    # Create custom list of augmentations and probabilities
+    else:
+        aug = []
+
+        for des_aug in args:
+            if des_aug[0] == 'hflip':
+                aug += [transforms.RandomHorizontalFlip(p=des_aug[1])]
+            
+            elif des_aug[0] == 'crop':
+                aug += [transforms.RandomResizedCrop(size=size)]
+            
+            elif des_aug[0] == 'c_jitter':
+                aug += [transforms.RandomApply([transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.1)], p=des_aug[1])]
+
+            elif des_aug[0] == 'gray':
+                aug += [transforms.RandomGrayscale(p=des_aug[1])]
+
+            elif des_aug[0] == 'g_blur':
+                aug += [transforms.GaussianBlur(kernel_size=9)]
+        
+        aug += [transforms.ToTensor(),
+                transforms.Normalize(norm[0], norm[1]),]
+
+        return aug
+
+def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views=1, 
+              spe_pair=False, aug=False,                                                                      # simclr
+              pre_type='supervised', noise_path=None, resize_image=False, shuffle_noise=True, random_seed=42, # counterfact & noise 
+              num_workers=4):
     # TODO: pin_memory = True
     cifar_norm = [(0.4914, 0.4822, 0.4465), (0.2471, 0.2435, 0.2616)]
     ImageNet_norm = [(0.485, 0.456, 0.406), (0.229, 0.224, 0.225)]
@@ -1047,24 +1088,36 @@ def load_data(dataset, bs=64, stage='pre', finetune=False, n_views=1,
                                  std=cifar_norm[1])]
         transform = transforms.Compose(transform_array)
         
-        if n_views > 1: # Apply SimCLR augmentations
-            transform_array = simclr_aug(size=32)
-            transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+        if aug: # Augment the dataset with simCLR aug
+            transform = transforms.Compose(simclr_aug(size=32, norm=cifar_norm))
+
+        elif n_views > 1: # Apply SimCLR augmentations
+            if not args_simclr: # standard aug for any nb of views
+                transform_array = simclr_aug(size=32, norm=cifar_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+            elif spe_pair: # custom aug for 2 views of (non-aug, aug) combinaiton
+                spe_transform_array = simclr_aug(32, args_simclr, norm=cifar_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array),
+                                                       spe_transforms=transforms.Compose(spe_transform_array))
+            else: # custom aug for any nb of views
+                transform_array = simclr_aug(32, args_simclr, norm=cifar_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+
         
         # TODO: WILL downstream without finetuning ever happen??
         # On downstream without finetuning, no need to load train and test sets separately, 
         # for bigger test set, set train=True
         if stage=='down' and not finetune:
             ds_test = CIFAR10(root='./data', train=False, download=True, transform=transform)
-            test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=0)
+            test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=num_workers)
 
             return None, test_loader
 
         else:
             ds_train = CIFAR10(root='./data', train=True, download=True, transform=transform)
             ds_test = CIFAR10(root='./data', train=False, download=True, transform=transform)
-            train_loader = DataLoader(ds_train, batch_size=bs, shuffle=True, num_workers=0)
-            test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=0)
+            train_loader = DataLoader(ds_train, batch_size=bs, shuffle=True, num_workers=num_workers)
+            test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=num_workers)
 
             return train_loader, test_loader
     
@@ -1078,21 +1131,29 @@ def load_data(dataset, bs=64, stage='pre', finetune=False, n_views=1,
         transform = transforms.Compose(transform_array)
 
         if n_views > 1: # Apply SimCLR augmentations
-            transform_array = simclr_aug(size=224)
-            transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+            if not args_simclr:
+                transform_array = simclr_aug(size=224, norm=ImageNet_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+            elif spe_pair: # test embed distance for specific pair of normal/augmented combinaiton
+                spe_transform_array = simclr_aug(224, args_simclr, norm=ImageNet_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views, 
+                                                       spe_transforms=transforms.Compose(spe_transform_array))
+            else: # custom set of augmentations
+                transform_array = simclr_aug(224, args_simclr, norm=ImageNet_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
         
         # On downstream without finetuning, no need to load train and test sets separately, for more exhaustive test set, set train=True
         if stage=='down' and not finetune:
             ds_test = ImageNet(root='./data', split='test', download=True, transform=transform)
-            test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=0)
+            test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=num_workers)
 
             return None, test_loader
         
         else:
             ds_train = ImageNet(root='./data', split='train', download=True, transform=transform)
             ds_test = ImageNet(root='./data', split='test', download=True, transform=transform)
-            train_loader = DataLoader(ds_train, batch_size=bs, shuffle=True, num_workers=0)
-            test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=0)
+            train_loader = DataLoader(ds_train, batch_size=bs, shuffle=True, num_workers=num_workers)
+            test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=num_workers)
 
             return train_loader, test_loader
 
@@ -1115,7 +1176,7 @@ def load_data(dataset, bs=64, stage='pre', finetune=False, n_views=1,
                 split="train",
                 download=True,
                 transform=ContrastiveTransformations(contrast_transforms, n_views=2))
-            test_loader = DataLoader(labeled_data_contrast, batch_size=bs, shuffle=False, num_workers=0)
+            test_loader = DataLoader(labeled_data_contrast, batch_size=bs, shuffle=False, num_workers=num_workers)
 
             return None, test_loader
 
@@ -1130,8 +1191,8 @@ def load_data(dataset, bs=64, stage='pre', finetune=False, n_views=1,
                 split="train",
                 download=True,
                 transform=ContrastiveTransformations(contrast_transforms, n_views=2))
-            train_loader = DataLoader(unlabeled_data, batch_size=bs, shuffle=True, num_workers=0)
-            test_loader = DataLoader(labeled_data_contrast, batch_size=bs, shuffle=False, num_workers=0)
+            train_loader = DataLoader(unlabeled_data, batch_size=bs, shuffle=True, num_workers=num_workers)
+            test_loader = DataLoader(labeled_data_contrast, batch_size=bs, shuffle=False, num_workers=num_workers)
 
             return train_loader, test_loader
     
@@ -1146,9 +1207,9 @@ def load_data(dataset, bs=64, stage='pre', finetune=False, n_views=1,
         ds_train = Cityscapes(root='./data/cityscapes', split='train', mode='fine', target_type='semantic', download=True, transform=transform)
         ds_val = Cityscapes(root='./data/cityscapes', split='val', mode='fine', target_type='semantic', download=True, transform=transform)
         ds_test = Cityscapes(root='./data/cityscapes', split='test', mode='fine', target_type='semantic', download=True, transform=transform)
-        train_loader = DataLoader(ds_train, batch_size=bs, shuffle=True, num_workers=0)
-        val_loader = DataLoader(ds_val, batch_size=bs, shuffle=False, num_workers=0)
-        test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=0)
+        train_loader = DataLoader(ds_train, batch_size=bs, shuffle=True, num_workers=num_workers)
+        val_loader = DataLoader(ds_val, batch_size=bs, shuffle=False, num_workers=num_workers)
+        test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=num_workers)
 
         return train_loader, val_loader, test_loader
 
@@ -1156,6 +1217,44 @@ def load_data(dataset, bs=64, stage='pre', finetune=False, n_views=1,
         
     elif dataset=='OTHER CUSTOM ONE':
         pass
+
+    elif dataset=='counterfactual':
+        if resize_image:
+            transform_array.append(
+                transforms.Resize((96,96))
+            )
+
+        transform_array += [
+            transforms.RandomResizedCrop(64, scale=(0.08, 1)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=ImageNet_norm[0],
+                                 std=ImageNet_norm[1]),]
+
+        transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+
+        df, size = load_counterfact()
+        dataset = Dataset_counterfact(df=df, transforms=transform, size=size, pre_type=pre_type)
+
+        # Split training and validation splits:
+        dataset_size = len(dataset)
+        indices = list(range(dataset_size))
+        test_size = 0.1
+        split = int(np.floor(test_size * dataset_size))
+        if shuffle_noise :
+            np.random.seed(random_seed)
+            np.random.shuffle(indices)
+        train_indices, val_indices = indices[split:], indices[:split]
+
+        train_loader = DataLoader(dataset, batch_size=bs, num_workers=num_workers,
+                                  shuffle=False, pin_memory=True, sampler=SubsetRandomSampler(train_indices))
+        test_loader = DataLoader(dataset, batch_size=bs, num_workers=num_workers,
+                                 pin_memory=True, sampler=SubsetRandomSampler(val_indices))
+        
+        return train_loader, test_loader
+
 
     elif dataset=='noise':
         if resize_image:
@@ -1173,9 +1272,10 @@ def load_data(dataset, bs=64, stage='pre', finetune=False, n_views=1,
                 (0.44087801806139126, 0.42790631331699347, 0.3867879370752931),
                 (0.26826768628079806, 0.2610450402318512, 0.26866836876860795),
             ),]
-        transform = transforms.Compose(transform_array)
-        transform = ContrastiveTransformations(transform, n_views=n_views)
-        dataset = datasets.ImageFolder(path, transform=transform)
+
+        transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+        # dataset = datasets.ImageFolder('./data/noise', transform=transform)
+        dataset = Dataset_noise(noise_path, transforms=transform)
 
         # Split training and validation splits:
         dataset_size = len(dataset)
@@ -1188,9 +1288,9 @@ def load_data(dataset, bs=64, stage='pre', finetune=False, n_views=1,
         train_indices, val_indices = indices[split:], indices[:split]
 
 
-        train_loader = torch.utils.data.DataLoader(dataset, batch_size=bs, num_workers=0,
+        train_loader = DataLoader(dataset, batch_size=bs, num_workers=num_workers,
                                                    shuffle=False, pin_memory=True, sampler=SubsetRandomSampler(train_indices))
-        test_loader = torch.utils.data.DataLoader(dataset, batch_size=bs, num_workers=0,
+        test_loader = DataLoader(dataset, batch_size=bs, num_workers=num_workers,
                                                   pin_memory=True, sampler=SubsetRandomSampler(val_indices))
         
         return train_loader, test_loader
@@ -1209,7 +1309,41 @@ class MyDataset(torch.utils.data.Dataset):
         img = Image.open(title)
         return self.transforms(img), title
 
+class Dataset_counterfact(torch.utils.data.Dataset):
+    def __init__(self, df, transforms, size, pre_type):
+        self.df = df
+        self.transforms = transforms
+        self.size = size
+        self.pre_type = pre_type
 
+    def __len__(self):
+        return self.df.shape[0]
+
+    def __getitem__(self, index):
+        title = os.path.join("./data", "{}_imgs".format(self.size), "ims", self.df.im_name[index]) + '_x_gen.jpg'
+        image = Image.open(title)
+        
+        if self.pre_type == 'contrastive': # do not return labels
+            return self.transforms(image)
+
+        elif self.pre_type == 'shape_bias': #TODO: will only need these if want to use to eval shape bias
+            labels = (self.df.shape_cls[index], self.df.texture_cls[index], self.df.bg_cls[index])
+        else:
+            labels = self.df.shape_cls[index]
+
+        return self.transforms(image), labels
+
+class Dataset_noise(torch.utils.data.Dataset):
+    def __init__(self, img_list, transforms):
+        self.img_list = img_list
+        self.transforms = transforms
+
+    def __len__(self):
+        return len(self.img_list)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.img_list[idx])
+        return self.transforms(img) # no labels for this dataset
 
 def load_noise_brute():
     noise_list = [
@@ -1238,8 +1372,9 @@ def load_noise_brute():
 
     return paths
 
-def load_noise():
-    noise_list = [
+def load_noise(*args):
+    if not args:
+        noise_list = [
         'dead_leaves-squares',
         'dead_leaves-oriented',
         'dead_leaves-mixed',
@@ -1253,8 +1388,11 @@ def load_noise():
         'stylegan-sparse',
         'stylegan-oriented',
         'feature_vis-random',
-        'feature_vis-dead_leaves'
-    ]
+        'feature_vis-dead_leaves']
+    else:
+        noise_list = []
+        for i in args:
+            noise_list.append(i)
 
     paths = []
     for folder in noise_list:
@@ -1288,9 +1426,10 @@ def load_geirhos_transfer_pre(conflict_only=False):
     
     return paths
 
-def load_counterfact(size=2500, verbose=False):
+def load_counterfact(size=10000, verbose=False):
     avail_sizes = [10, 500, 2500, 10000]
 
+    # Select dataset to best fit nb of images required
     if size <= avail_sizes[0]:
         to_pick = avail_sizes[0]
     elif size >= avail_sizes[-1]:
@@ -1300,14 +1439,12 @@ def load_counterfact(size=2500, verbose=False):
             if avail_sizes[i] < size <= avail_sizes[i+1]:
                 to_pick = avail_sizes[i+1]
     
-    dir = "counterfactual_generative_networks/imagenet/data/{}_imgs".format(to_pick)
-    
-    labels = pd.read_csv(os.path.join(dir, 'labels.csv'))
-    labels = labels.drop(labels.columns[0], axis=1)
-    paths = sorted(os.listdir(os.path.join(dir, 'ims')))
+    dir = "./data/{}_imgs".format(to_pick)    
+    df = pd.read_csv(os.path.join(dir, 'labels.csv'))
+    df = df.drop(df.columns[0], axis=1)
 
     if verbose: print('Loading counterfactual set of size {}'.format(to_pick))
-    return labels, paths
+    return df, to_pick
 
 
 if __name__ == '__main__':
