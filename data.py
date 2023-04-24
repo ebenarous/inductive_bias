@@ -1157,6 +1157,40 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
 
             return train_loader, test_loader
 
+    elif dataset=='tiny': #TODO: what are standard augs on tiny?
+        transform_array += [
+            transforms.ToTensor(),            
+            transforms.Normalize(mean=ImageNet_norm[0],
+                                 std=ImageNet_norm[1])]
+        transform = transforms.Compose(transform_array)
+
+        if n_views > 1: # Apply SimCLR augmentations
+            if not args_simclr:
+                transform_array = simclr_aug(size=64, norm=ImageNet_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+            elif spe_pair: # test embed distance for specific pair of normal/augmented combinaiton
+                spe_transform_array = simclr_aug(64, args_simclr, norm=ImageNet_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views, 
+                                                       spe_transforms=transforms.Compose(spe_transform_array))
+            else: # custom set of augmentations
+                transform_array = simclr_aug(64, args_simclr, norm=ImageNet_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+
+        # On downstream without finetuning, no need to load train and test sets separately, for more exhaustive test set, set train=True
+        if stage=='down' and not finetune:
+            ds_test = TinyImageNetDataset(stage='val', transform=transform)
+            test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=num_workers, pin_memory=True)
+
+            return None, test_loader
+        
+        else:
+            ds_train = TinyImageNetDataset(stage='train', transform=transform)
+            ds_test = TinyImageNetDataset(stage='val', transform=transform)
+            train_loader = DataLoader(ds_train, batch_size=bs, shuffle=True, num_workers=num_workers, pin_memory=True)
+            test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=num_workers, pin_memory=True)
+
+            return train_loader, test_loader
+    
     elif dataset=='STL10':
 
         contrast_transforms = transforms.Compose([
@@ -1344,6 +1378,60 @@ class Dataset_noise(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         img = Image.open(self.img_list[idx])
         return self.transforms(img) # no labels for this dataset
+
+
+def tiny_class_to_int():
+    classes = open("data/tiny-imagenet-200/wnids.txt").readlines()
+    map = {}
+    i = 0
+    for line in classes:
+        map[line.strip('\n')] = i
+        i += 1
+    return map
+
+class TinyImageNetDataset(torch.utils.data.Dataset):
+    # Adapted from from https://www.kaggle.com/c/thu-deep-learning/overview/tips
+    def __init__(self, root="./data/tiny-imagenet-200", stage='train', transform=transforms.ToTensor()):
+        # root: your_path/TinyImageNet/
+        images = []
+        map = tiny_class_to_int()
+
+        if stage=='train':
+            path = "./data/tiny-imagenet-200/train"
+            for label in os.listdir(path):
+                for image in os.listdir(os.path.join(path, label, 'images')):
+                    name = os.path.join('train', label, 'images', image)
+                    images.append((name, map[label]))
+
+        elif stage=='val':
+            path = "./data/tiny-imagenet-200/val/val_annotations.txt"
+            labels = open(path).readlines()
+            for line in labels:
+                items = line.strip('\n').split()
+                img_name = os.path.join('val', 'images', items[0])
+
+                # test list contains only image name
+                test_flag = True if len(items) == 1 else False
+                label = None if test_flag == True else np.array(map[items[1]])
+
+                if os.path.isfile(os.path.join(root, img_name)):
+                    images.append((img_name, label))
+                else:
+                    print(os.path.join(root, img_name) + 'Not Found.')
+
+        self.root = root
+        self.images = images
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.images)
+    
+    def __getitem__(self, index):
+        img_name, label = self.images[index]
+        img = Image.open(os.path.join(self.root, img_name)).convert('RGB')
+
+        return self.transform(img), label
+
 
 def load_noise_brute():
     noise_list = [

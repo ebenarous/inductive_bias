@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 import copy
 import os
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -14,23 +15,25 @@ from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from torchvision.models.feature_extraction import create_feature_extractor
 from sklearn.neighbors import KNeighborsClassifier as KNN
+from scipy.spatial.distance import pdist
 
 from sot_torchvision_models import resnet18, resnet50
 from sot_modif_resnet import modify_resnet_model
-from data import load_geirhos_transfer_pre, load_data, MyDataset
+from models import *
+from vit_models import ViT
+
+from data import load_geirhos_transfer_pre, load_data, MyDataset, load_noise
 from geirhos.probabilities_to_decision import ImageNetProbabilitiesTo16ClassesMapping
-from models import CNN, transformer
 from loss import info_nce_loss
 from utils import create_logger, visualize, norm_calc, find_overlap, remove_int
 
-from models import *
 
-def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=nn.Module, pre_lr=0.001, 
+def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=nn.Module, pre_lr=0.001,
                   log_interval=100, save_models=False, save_path=None, verbose=False, log=True, logger=None, device='cuda:0'):
     """
     Modify loss and optimizer inside function because that's not something we need to modify easily. Not project focus.
     """
-    
+    logger.info('')
     if pre_type=='supervised':
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=pre_lr)
@@ -63,21 +66,17 @@ def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=
         optimizer = optim.Adam(model.parameters(), lr=pre_lr)
         train_acc = 0
         model.train()
-        for i, ((im_x, im_y), _) in enumerate(train_loader):
-            optim.zero_grad()
+        for i, (im_x, im_y) in enumerate(train_loader):
+            optimizer.zero_grad()
             inputs = torch.cat([im_x, im_y], dim=0).to(device)
             out = model(inputs)
             # need to separate again with .chunk(2) ?
 
             # Apply InfoNCE loss
-            loss, acc = info_nce_loss(out=out, temperature=0.5)
+            loss, acc = info_nce_loss(out=out, temperature=0.5, log=log)
             loss.backward()
-            optim.step()
+            optimizer.step()
             train_acc += acc.item()
-            
-            # im1, im2 = transforms.ToPILImage()(torch.squeeze(im_x[0])), transforms.ToPILImage()(torch.squeeze(im_y[0]))
-            # im1.show()
-            # im2.show()
 
             if i % log_interval == 0:
                 msg = '[Epoch %d] Batch [%d], Loss: %.3f' % (epoch + 1, i + 1, loss.item())
@@ -107,18 +106,27 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
         # Remain in contrastive framework
         test_acc = 0
         test_loss = 0
+        avg_dist = 0
+
         model.eval()
         with torch.no_grad():
-            for i, ((im_x, im_y), _) in enumerate(test_loader):
+            for i, (im_x, im_y) in enumerate(test_loader):
                 inputs = torch.cat([im_x, im_y], dim=0).to(device)
-                out = model(inputs)
-                loss, acc = info_nce_loss(out=out, temperature=0.5)
+                h, out = model(inputs, return_both=True) # used to be out = model(inputs)
+
+                # Compute distance between embeddings of same batch
+                dist_vec = pdist(h.detach().cpu().numpy(), metric='cosine')
+                avg_dist += np.sum(dist_vec) / len(dist_vec)
+
+                # Standard test classification procedure
+                loss, acc = info_nce_loss(out=out, temperature=0.5, mode='test', log=log)
                 test_acc += acc.item()
                 test_loss += loss.item()
             
         # TODO: Is this correct? is the acc computed in InfoNCE logical?
         test_acc = 100. * test_acc / len(test_loader.dataset)
         test_loss /= len(test_loader.dataset)
+        avg_dist /= len(test_loader.dataset)
 
         if save_models and save_path is not None: 
             torch.save(model.state_dict(), save_path)
@@ -134,6 +142,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
         criterion = nn.CrossEntropyLoss()
         test_correct = 0
         test_loss = 0
+        avg_dist = 0
 
         # If downstream testing, the nb_classes should be different from the pre_training, 
         # regardless of pre_type and finetune
@@ -146,12 +155,24 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
             for inputs, labels in test_loader:
                 inputs = inputs.to(device)
                 labels = labels.to(device)
-                out = model(inputs) if stage == 'Pre' else classifier(model(inputs, return_embed=True))
+                
+                if stage == 'Pre':
+                    h, out = model(inputs, return_both=True)
+                else:
+                    h = model(inputs, return_embed=True)
+                    out = classifier(h)
+                
+                # Compute distance between embeddings of same batch
+                dist_vec = pdist(h.detach().cpu().numpy(), metric='cosine')
+                avg_dist += np.sum(dist_vec) / len(dist_vec)
+
+                # Standard test classification procedure
                 test_loss += criterion(out, labels)
                 pred = out.argmax(dim=1, keepdim=True)
                 test_correct += pred.eq(labels.view_as(pred)).sum().item() 
         test_acc = 100. * test_correct / len(test_loader.dataset)
         test_loss /= len(test_loader.dataset)
+        avg_dist /= len(test_loader.dataset)
 
         msg = '[Epoch %d] %s-testing complete, Avg Loss: %.3f, Acc: %.3f%%' % (epoch + 1, stage, test_loss, test_acc)
         if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
@@ -162,24 +183,26 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
             if verbose: print(msg)
             if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
 
-    return test_acc
+    return test_acc, avg_dist
 
 def down_finetune(epoch, finetune_epochs=5, pre_type='supervised', train_loader=DataLoader, 
                   model=nn.Module, is_vit=False, classifier=nn.Module, down_lr=0.001,
                   log_interval=100, save_models=False, save_path=None, verbose=False, log=True, logger=None, device='cuda:0'):
-    if pre_type=='supervised':
+    '''if pre_type=='supervised':
         # modify fc dimensions and finetune with standard training procedure
         if not is_vit: model.fc = classifier
         else: model.head = classifier
         model.train()
     
-    elif pre_type=='contrastive':
+    elif pre_type=='contrastive': 
         # freeze encoder and train a head
         if not is_vit: model.fc = nn.Identity()
         else: model.head = nn.Identity()
         model.eval()
-        classifier.train()
+        classifier.train()''' # TODO: can fix the identity pb with return_embed=True but how to finetune encoder?
     
+    model.eval()
+    classifier.train()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=down_lr)
     for e in range(finetune_epochs):
@@ -189,11 +212,12 @@ def down_finetune(epoch, finetune_epochs=5, pre_type='supervised', train_loader=
             inputs, labels = data[0].to(device), data[1].to(device)
             optimizer.zero_grad()
             
-            if pre_type=='supervised':
+            '''if pre_type=='supervised':
                 out = model(inputs)
             elif pre_type=='contrastive':
-                out = classifier(model(inputs))
+                out = classifier(model(inputs))'''# TODO: can fix the identity pb with return_embed=True but how to finetune encoder?
             
+            out = classifier(model(inputs, return_embed=True))
             loss = criterion(out, labels)
             loss.backward()
             optimizer.step()
@@ -210,7 +234,7 @@ def down_finetune(epoch, finetune_epochs=5, pre_type='supervised', train_loader=
     train_acc = 100. * train_correct / len(train_loader.dataset)
     train_loss /= len(train_loader.dataset)
     
-    msg = '[Epoch %d] finetuning complete, Avg Loss: %.3f, Acc: %.3f%%' % (epoch + 1, train_loss, train_acc)
+    msg = '[Epoch %d] Finetuning complete, Avg Loss: %.3f, Acc: %.3f%%' % (epoch + 1, train_loss, train_acc)
     if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
     if verbose: print(msg)
     if save_models and save_path is not None: 
@@ -345,7 +369,7 @@ def eval_bias_embed(model, loader, nb_neigh=5, metric='cosine', is_vit=False,
 
     return model_bias_avg, model_acc_avg
 
-def eval_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=DataLoader, 
+def eval_views_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=DataLoader, 
                         save_models=False, save_path=None, verbose=False, log=True, logger=None, device='cuda:0'):
     # Testing the encoder with embedding distances
     
@@ -358,14 +382,16 @@ def eval_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=DataLoader
         for inputs, _ in test_loader:
             nb_views = len(inputs)
             batch_size = len(inputs[0])
-            inputs = torch.cat([view for view in inputs], dim=0).to(device) # won't work if loader does not load 2 views
+            inputs = torch.cat([view for view in inputs], dim=0).to(device) # won't work if loader does not load 2+ views
             out = model(inputs, return_embed=True)
 
             div = ((nb_views-1) * ((nb_views-1) + 1)) / 2
             for h in out.chunk(batch_size, dim=0):
-                # TODO: cosine similarity
-                mean_dist = norm_calc(tens=h, type='euclidian', div=div)
-                avg_dist += mean_dist 
+                '''# TODO: cosine similarity
+                mean_dist = norm_calc(tens=h, type='euclidean', div=div)
+                avg_dist += mean_dist '''
+                dist_vec = pdist(h.detach().cpu().numpy(), metric='cosine')
+                avg_dist += np.sum(dist_vec) / len(dist_vec)
     avg_dist /= len(test_loader.dataset)
 
     if save_models and save_path is not None: 
@@ -374,14 +400,14 @@ def eval_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=DataLoader
         if verbose: print(msg)
         if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
 
-    msg = '[Epoch %d] Pair embeddings distance testing complete, Avg Distance: %.3f' % (epoch + 1, avg_dist.item())
+    msg = '[Epoch %d] Pair embeddings distance testing complete, Avg Distance: %.3f' % (epoch + 1, avg_dist)
     if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
     if verbose: print(msg)
 
-    return avg_dist.item()
+    return avg_dist
 
 
-def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset='CIFAR10', 
+def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset='CIFAR10', aug_pre=False,
             finetune=False, down_dataset='CIFAR10', 
             test_interval=5, save_models=False, experiment_id='test1_elior', modelnames=[]):    
         
@@ -396,18 +422,23 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
         assert len(models2compare) == len(modelnames), 'Provide a list of model names with same length as list of models to be tested'
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-        # Pre and Down dataloaders
-        pre_train, pre_test = load_data(dataset=pre_dataset, stage='pre', finetune=finetune)
+        # Pre and Down Dataloader
+        pre_train, pre_test = load_data(dataset=pre_dataset, stage='pre', finetune=finetune, aug=aug_pre) # TODO: cifar train with simCLR aug
         down_train, down_test = load_data(dataset=down_dataset, stage='down', finetune=finetune)
-
+        
         # Custom Geirhos Dataloader
         bias_data_path = load_geirhos_transfer_pre(conflict_only=True)
         geirhos_bs = 256 if device=='cuda:0' else 1
-        mydataset = MyDataset(bias_data_path, transforms=transforms.ToTensor())
-        geirhos_loader = torch.utils.data.DataLoader(mydataset, batch_size=geirhos_bs, num_workers=0, shuffle=False, pin_memory=False)
+        geirhos_ds = MyDataset(bias_data_path, transforms=transforms.Compose([transforms.Resize(32),
+                                                                             transforms.ToTensor(),
+                                                                             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])) #TODO: downsize to 32 because pretrain cifar
+        geirhos_loader = torch.utils.data.DataLoader(geirhos_ds, batch_size=geirhos_bs, num_workers=0, shuffle=False, pin_memory=False)
 
         # Pair Embedding Distances Dataloader
-        _ , pair_dist_loader = load_data(dataset=down_dataset, stage='down', finetune=finetune, n_views=5)
+        _ , views_dist_loader = load_data(dataset=down_dataset, stage='down', finetune=finetune, n_views=3)
+        _ , gray_pair_dist_loader = load_data(down_dataset, ('gray', 1), stage='down', finetune=finetune, n_views=2, spe_pair=True) # ensure other sample is augmented
+        _ , hflip_pair_dist_loader = load_data(down_dataset, ('hflip', 1), stage='down', finetune=finetune, n_views=2, spe_pair=True) # ensure other sample is augmented
+        _ , rdm_rcrop_pair_dist_loader = load_data(down_dataset, ('crop', 1), stage='down', finetune=finetune, n_views=2, spe_pair=True)
 
         # Init logger
         logger = create_logger(experiment_id)
@@ -424,12 +455,15 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
         scores_epochs = []
         for model in models2compare:
             model.to(device)
-            scores.append([])
             
-            try: model.fc # for model.fc / model.head
+            scores.append([])
+            distances = []
+
+            try: model.fc # for model.fc / model.head 
             except: is_vit = True
             else: is_vit = False
-
+            
+            logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + 'Start of {}'.format(modelnames[scores_idx]))
             for epoch in range(train_epochs):
                 
                 save_path = os.path.join('model', '{}_{}_pre.pth'.format(modelnames[scores_idx], epoch+1))
@@ -443,8 +477,8 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                     
                     # Pretext test
                     if pre_dataset != 'noise':
-                        result_pre = test(pre_type=pre_type, model=model, test_loader=pre_test, is_vit=is_vit, stage='Pre',
-                                          save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
+                        result_pre, dist_pre = test(pre_type=pre_type, model=model, test_loader=pre_test, is_vit=is_vit, stage='Pre',
+                                                    save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
 
                     
                     # Shape bias with Geirhos method (1200 images in his custom set)
@@ -467,25 +501,55 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                                       log_interval=100, save_models=False, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
                 
                     # Test on downstream task
-                    result_down = test(pre_type=pre_type, model=model, test_loader=down_test, classifier=classifier, is_vit=is_vit, stage='Down',
-                                       save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
+                    result_down, dist_down = test(pre_type=pre_type, model=model, test_loader=down_test, classifier=classifier, is_vit=is_vit, stage='Down',
+                                                  save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
 
-                    # Pair Embeddings distance 
-                    result_pair_dist = eval_embed_dist(model=model, is_vit=is_vit, test_loader=pair_dist_loader, 
+                    # Views Embeddings distance 
+                    result_3simclr_dist = eval_views_embed_dist(model=model, is_vit=is_vit, test_loader=views_dist_loader, 
                                                        save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
-
+                    result_pair_dist_gray = eval_views_embed_dist(model=model, is_vit=is_vit, test_loader=gray_pair_dist_loader, 
+                                                       save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
+                    result_pair_dist_hflip = eval_views_embed_dist(model=model, is_vit=is_vit, test_loader=hflip_pair_dist_loader, 
+                                                       save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
+                    result_pair_dist_rdm_crop = eval_views_embed_dist(model=model, is_vit=is_vit, test_loader=rdm_rcrop_pair_dist_loader, 
+                                                       save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
+                    
+                    print('Pre: %.3f, Down: %.3f, Gray: %.3f, Hflip: %.3f, Rcrop: %.3f' % (dist_pre, dist_down, result_pair_dist_gray, result_pair_dist_hflip, result_pair_dist_rdm_crop))
 
                     # Save all results
                     if pre_dataset != 'noise':
-                        scores[scores_idx].append([result_pre, result_bias, result_down, result_pair_dist])
+                        scores[scores_idx].append([result_pre, result_bias, result_down, result_3simclr_dist])
+                        distances.append([dist_pre, dist_down, result_pair_dist_gray, result_pair_dist_hflip, result_pair_dist_rdm_crop])
                     else :
-                        scores[scores_idx].append([result_bias, result_down, result_pair_dist])
+                        scores[scores_idx].append([result_bias, result_down, result_3simclr_dist])
                     if scores_idx == 0: scores_epochs.append(epoch+1)
 
                 '''scheduler.step()'''
+        
+            ### Specific distance analysis, temp so not in visualize
+            distances = np.vstack(distances)
+            labels = ['pre', 'down', 'gray', 'hflip', 'rcrop']
+            fig, ax1 = plt.subplots()
+            ax1.plot(scores_epochs, distances[:, 0], 'g', label='pre')
+            ax1.plot(scores_epochs, distances[:, 1], 'k', label='down')
+            ax2 = ax1.twinx()
+            ax2.plot(scores_epochs, distances[:, 2], 'b', label='gray')
+            ax2.plot(scores_epochs, distances[:, 3], 'r', label='hflip')
+            ax2.plot(scores_epochs, distances[:, 4], 'orange', label='rcrop')
+
+            lines, labels = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax2.legend(lines + lines2, labels + labels2, loc='center right')
+            plt.title('{}__distances_on_CIFAR10'.format(modelnames[scores_idx]))
+            ax1.set_xlabel('Epochs')
+            ax1.set_ylabel('Distance (non augmented same batch)')
+            ax2.set_ylabel('Distance (pair of aug/non-aug)')
+            plt.tight_layout()
+            plt.savefig(os.path.join('scores', '{}_distances_on_CIFAR10.png'.format(modelnames[scores_idx])), dpi=300)
+            ### Specific distance analysis, temp so not in visualize
 
             scores_idx += 1
-        
+
         score_table = pd.DataFrame(scores, index=modelnames, columns=scores_epochs)
 
         return score_table
@@ -499,19 +563,35 @@ if __name__ == '__main__':
     # Create & Assemble models to be tested
     res18 = resnet18(num_classes=10)
     res50 = resnet50(num_classes=10)
-
     ResNet18_for_CIFAR = modify_resnet_model(res18)
+    vit = ViT(hidden=512, mlp_hidden=512*4, img_size=32, patch=8)
+    
     models_to_compare = [] # = ['ViT contrastive', 'ResNet50 supervised', ...]
+    models_to_compare.append(vit)
     models_to_compare.append(ResNet18_for_CIFAR)
-    model_names = ['ResNet18_for_CIFAR']
+    model_names = ['ViT_for_CIFAR', 'ResNet18_for_CIFAR']
 
-    scores = main(models2compare=models_to_compare, train_epochs=5, test_interval=2, 
-                  save_models=False, experiment_id='test1', modelnames=model_names)
+    scores = main(models2compare=models_to_compare, train_epochs=100, test_interval=5, 
+                  save_models=False, experiment_id='test_both_aug', modelnames=model_names)
     pd.DataFrame(scores.T).to_excel(os.path.join('scores', 'FULL.xlsx'))
     visualize(scores, model_names, save=True, pre_data='not_noise')
 
 '''
 Notes:
+
+# Loaders :
+    # Custom Counterfactual Dataloader
+    counter_train_sup, counter_test_sup = load_data(dataset='counterfactual', resize_image=False) # TODO: counterfactual supervised
+    counter_train_cont, counter_test_cont = load_data(dataset='counterfactual', n_views=2, resize_image=False) # TODO: counterfactual contrastive
+
+    # Pre Noise Dataloader
+    contrastive_path = load_noise('stylegan-oriented', 'feature_vis-random') # 1+ folders to use in train
+    pre_train_cont, pre_test_cont = load_data(dataset='noise', bs=64, n_views=2, noise_path=contrastive_path, 
+                                                resize_image=False, shuffle_noise=True)
+    # Call main
+    scores = main(models2compare=models_to_compare, train_epochs=20, test_interval=2, pre_type='contrastive', 
+                  pre_dataset='noise', finetune=True, save_models=False, experiment_id='noise', modelnames=model_names)
+
 
 # Integrate Checkpoints?
 
