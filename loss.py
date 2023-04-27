@@ -4,6 +4,7 @@ import torch
 
 def info_nce_loss(out, temperature=0.5, 
                   log=False, logger=None, mode="train"):
+    # adapted from https://lightning.ai/docs/pytorch/stable/notebooks/course_UvA-DL/13-contrastive-learning.html
 
     # Calculate cosine similarity
     cos_sim = F.cosine_similarity(out[:, None, :], out[None, :, :], dim=-1)
