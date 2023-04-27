@@ -26,8 +26,8 @@ def info_nce_loss(out, temperature=0.5,
     
     # Logging ranking metrics
     if log:
-        logger.info(mode + "_acc_top1", (sim_argsort == 0).float().mean())
-        logger.info(mode + "_acc_top5", (sim_argsort < 5).float().mean())
-        logger.info(mode + "_acc_mean_pos", 1 + sim_argsort.float().mean())
+        logger.info(mode + "_acc_top1: {}".format((sim_argsort == 0).float().mean()))
+        logger.info(mode + "_acc_top5: {}".format((sim_argsort < 5).float().mean()))
+        logger.info(mode + "_acc_mean_pos: {}".format(1 + sim_argsort.item().float().mean()))
 
     return nll, (sim_argsort == 0).float().mean()

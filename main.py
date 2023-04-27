@@ -7,6 +7,7 @@ from PIL import Image
 import copy
 import os
 import matplotlib.pyplot as plt
+import wandb
 
 import torch
 import torch.nn as nn
@@ -73,7 +74,7 @@ def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=
             # need to separate again with .chunk(2) ?
 
             # Apply InfoNCE loss
-            loss, acc = info_nce_loss(out=out, temperature=0.5, log=log)
+            loss, acc = info_nce_loss(out=out, temperature=0.5, log=log, logger=logger)
             loss.backward()
             optimizer.step()
             train_acc += acc.item()
@@ -119,7 +120,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
                 avg_dist += np.sum(dist_vec) / len(dist_vec)
 
                 # Standard test classification procedure
-                loss, acc = info_nce_loss(out=out, temperature=0.5, mode='test', log=log)
+                loss, acc = info_nce_loss(out=out, temperature=0.5, mode='test', log=log, logger=logger)
                 test_acc += acc.item()
                 test_loss += loss.item()
             
@@ -127,16 +128,16 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
         test_acc = 100. * test_acc / len(test_loader.dataset)
         test_loss /= len(test_loader.dataset)
         avg_dist /= len(test_loader.dataset)
-
+        
+        msg = '[Epoch %d] %s-testing complete, Avg Loss: %.3f, Acc: %.3f%%' % (epoch + 1, stage, test_loss, test_acc)
+        if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
+        if verbose: print(msg)
         if save_models and save_path is not None: 
             torch.save(model.state_dict(), save_path)
             msg = 'Model saved to {}'.format(save_path)
             if verbose: print(msg)
             if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
 
-        msg = '[Epoch %d] %s-testing complete, Avg Loss: %.3f, Acc: %.3f%%' % (epoch + 1, stage, test_loss, test_acc)
-        if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
-        if verbose: print(msg)
       
     else:
         criterion = nn.CrossEntropyLoss()
@@ -183,6 +184,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
             if verbose: print(msg)
             if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
 
+    wandb.log({'{}_acc'.format(stage):test_acc, '{}_loss'.format(stage):test_loss})
     return test_acc, avg_dist
 
 def down_finetune(epoch, finetune_epochs=5, pre_type='supervised', train_loader=DataLoader, 
@@ -247,7 +249,6 @@ def down_finetune(epoch, finetune_epochs=5, pre_type='supervised', train_loader=
 
 def eval_bias(model, loader, mapping, 
                   log=True, verbose=False, logger=None, epoch=0, device='cuda:0'):
-    #TODO: normalize the images? if yes: compute mean,std once and add line transforms.Normalize((XX, XX, XX), (XX, XX, XX))
 
     model.eval()
     results = []
@@ -283,6 +284,7 @@ def eval_bias(model, loader, mapping,
     if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
     if verbose: print(msg)
 
+    wandb.log({'shape bias':shape_bias})
     return shape_bias, accuracy
 
 def eval_bias_embed(model, loader, nb_neigh=5, metric='cosine', is_vit=False,
@@ -366,7 +368,8 @@ def eval_bias_embed(model, loader, nb_neigh=5, metric='cosine', is_vit=False,
     msg = '[Epoch %d] Embedding Bias Eval complete, with %d neighbors - Shape Bias: %.3f%% Acc: %.3f%%' % (epoch + 1, nb_neigh, model_bias_avg, model_acc_avg)
     if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
     if verbose: print(msg)
-
+    
+    wandb.log({'shape bias knn':shape_bias})
     return model_bias_avg, model_acc_avg
 
 def eval_views_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=DataLoader, 
@@ -394,15 +397,14 @@ def eval_views_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=Data
                 avg_dist += np.sum(dist_vec) / len(dist_vec)
     avg_dist /= len(test_loader.dataset)
 
+    msg = '[Epoch %d] Pair embeddings distance testing complete, Avg Distance: %.3f' % (epoch + 1, avg_dist)
+    if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
+    if verbose: print(msg)
     if save_models and save_path is not None: 
         torch.save(model.state_dict(), save_path)
         msg = 'Model saved to {}'.format(save_path)
         if verbose: print(msg)
         if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
-
-    msg = '[Epoch %d] Pair embeddings distance testing complete, Avg Distance: %.3f' % (epoch + 1, avg_dist)
-    if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
-    if verbose: print(msg)
 
     return avg_dist
 
@@ -449,6 +451,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
             'CIFAR10'  : 10,
             'CIFAR100' : 100,
             'STL10'    : 10,
+            'tiny'     : 200,
         }
         scores = []
         scores_idx = 0
@@ -463,6 +466,8 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
             except: is_vit = True
             else: is_vit = False
             
+            # init wandb log
+            wandb.init(project=experiment_id)
             logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + 'Start of {}'.format(modelnames[scores_idx]))
             for epoch in range(train_epochs):
                 
@@ -513,7 +518,13 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                                                        save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
                     result_pair_dist_rdm_crop = eval_views_embed_dist(model=model, is_vit=is_vit, test_loader=rdm_rcrop_pair_dist_loader, 
                                                        save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
-                    
+                    wandb.log({
+                        "dist_batch":dist_pre,
+                        "dist_3_simclr":result_3simclr_dist,
+                        "dist_gray":result_pair_dist_gray,
+                        "dist_hflip":result_pair_dist_hflip,
+                        "dist_rcrop":result_pair_dist_rdm_crop,
+                    })
                     print('Pre: %.3f, Down: %.3f, Gray: %.3f, Hflip: %.3f, Rcrop: %.3f' % (dist_pre, dist_down, result_pair_dist_gray, result_pair_dist_hflip, result_pair_dist_rdm_crop))
 
                     # Save all results
@@ -522,7 +533,9 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                         distances.append([dist_pre, dist_down, result_pair_dist_gray, result_pair_dist_hflip, result_pair_dist_rdm_crop])
                     else :
                         scores[scores_idx].append([result_bias, result_down, result_3simclr_dist])
-                    if scores_idx == 0: scores_epochs.append(epoch+1)
+                    if scores_idx == 0: 
+                        scores_epochs.append(epoch+1)
+                        wandb.log({'epoch':epoch+1})
 
                 '''scheduler.step()'''
         
