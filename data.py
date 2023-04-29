@@ -1072,7 +1072,7 @@ def simclr_aug(size, *args, norm):
 
 def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views=1, 
               spe_pair=False, aug=False,                                                                      # simclr
-              pre_type='supervised', noise_path=None, resize_image=False, shuffle_noise=True, random_seed=42, # counterfact & noise 
+              pre_type='supervised', noise_path=None, fractal_path=None, resize_image=False, shuffle_noise=True, random_seed=42, # counterfact & noise & fractal
               num_workers=4):
     # TODO: pin_memory = True
     cifar_norm = [(0.4914, 0.4822, 0.4465), (0.2471, 0.2435, 0.2616)]
@@ -1289,7 +1289,6 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
         
         return train_loader, test_loader
 
-
     elif dataset=='noise':
         if resize_image:
             transform_array.append(
@@ -1309,7 +1308,39 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
 
         transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
         # dataset = datasets.ImageFolder('./data/noise', transform=transform)
-        dataset = Dataset_noise(noise_path, transforms=transform)
+        dataset = Dataset_no_label(noise_path, transforms=transform)
+
+        # Split training and validation splits:
+        dataset_size = len(dataset)
+        indices = list(range(dataset_size))
+        test_size = 0.1
+        split = int(np.floor(test_size * dataset_size))
+        if shuffle_noise :
+            np.random.seed(random_seed)
+            np.random.shuffle(indices)
+        train_indices, val_indices = indices[split:], indices[:split]
+
+
+        train_loader = DataLoader(dataset, batch_size=bs, num_workers=num_workers,
+                                                   shuffle=False, pin_memory=True, sampler=SubsetRandomSampler(train_indices))
+        test_loader = DataLoader(dataset, batch_size=bs, num_workers=num_workers,
+                                                  pin_memory=True, sampler=SubsetRandomSampler(val_indices))
+        
+        return train_loader, test_loader
+    
+    elif dataset=='fractal':
+        if resize_image:
+            transform_array.append(
+                transforms.Resize((96,96))
+            )
+
+        transform_array += [
+            transforms.RandomResizedCrop(64, scale=(0.08, 1)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),] #TODO: Normalize?
+
+        transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+        dataset = Dataset_no_label(fractal_path, transforms=transform)
 
         # Split training and validation splits:
         dataset_size = len(dataset)
@@ -1367,7 +1398,7 @@ class Dataset_counterfact(torch.utils.data.Dataset):
 
         return self.transforms(image), labels
 
-class Dataset_noise(torch.utils.data.Dataset):
+class Dataset_no_label(torch.utils.data.Dataset):
     def __init__(self, img_list, transforms):
         self.img_list = img_list
         self.transforms = transforms
@@ -1491,6 +1522,16 @@ def load_noise(*args):
 
     return paths
 
+def load_fractal():
+    # TODO: modif to select subset of images
+    fractal_path = os.path.join("data", "FractalDB")
+    paths = []
+    for folder in os.listdir(fractal_path):
+        for img in os.listdir(os.path.join(fractal_path, folder)):
+            paths.append(os.path.join(fractal_path, folder, img))
+    
+    return paths
+
 def load_geirhos_transfer_pre(conflict_only=False):
     paths = []
     for category in os.listdir(os.path.join("geirhos", "style-transfer-preprocessed-512")):
@@ -1535,5 +1576,5 @@ def load_counterfact(size=10000, verbose=False):
     return df, to_pick
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':    
     pass
