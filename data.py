@@ -1142,7 +1142,7 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
         transform = transforms.Compose(transform_array)
 
         if aug: # Augment the dataset with simCLR aug
-            transform = transforms.Compose(simclr_aug(size=224, norm=cifar_norm))
+            transform = transforms.Compose(simclr_aug(size=224, norm=ImageNet_norm))
         
         elif jigsaw_ps is not None:
             shuffle = ShufflePatches(jigsaw_ps)
@@ -1188,7 +1188,7 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
         transform = transforms.Compose(transform_array)
 
         if aug: # Augment the dataset with simCLR aug
-            transform = transforms.Compose(simclr_aug(size=64, norm=cifar_norm))
+            transform = transforms.Compose(simclr_aug(size=64, norm=ImageNet_norm))
         
         elif jigsaw_ps is not None:
             shuffle = ShufflePatches(jigsaw_ps)
@@ -1627,5 +1627,18 @@ class ShufflePatches(object):
     f = F.fold(pu, x.shape[-2:], kernel_size=self.ps, stride=self.ps, padding=0)
     return f 
 
+
+def okk(a=False, c=False):
+    if a:
+        print(1)
+    elif not a:
+        print(2)
+    
+    if c:
+        print(3)
+    elif not c:
+        print(4)
+
 if __name__ == '__main__':        
+    okk()
     pass

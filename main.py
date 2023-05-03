@@ -23,7 +23,7 @@ from sot_modif_resnet import modify_resnet_model
 from models import *
 from vit_models import ViT
 
-from data import load_geirhos_transfer_pre, load_data, MyDataset, load_noise
+from data import load_geirhos_transfer_pre, load_data, MyDataset, load_noise, load_fractal
 from geirhos.probabilities_to_decision import ImageNetProbabilitiesTo16ClassesMapping
 from loss import info_nce_loss
 from utils import create_logger, visualize, norm_calc, find_overlap, remove_int
@@ -410,8 +410,8 @@ def eval_views_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=Data
 
 
 def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset='CIFAR10', aug_pre=False,
-            finetune=False, down_dataset='CIFAR10', 
-            test_interval=5, save_models=False, experiment_id='test1_elior', modelnames=[]):    
+            test_interval=5, finetune=False, down_dataset='CIFAR10', 
+            save_models=False, experiment_id='test1_elior', modelnames=[]):    
         
         """
         Returns: score_table: shape = (nb of models to compare, nb of logged epochs)
@@ -437,10 +437,14 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
         geirhos_loader = torch.utils.data.DataLoader(geirhos_ds, batch_size=geirhos_bs, num_workers=0, shuffle=False, pin_memory=False)
 
         # Pair Embedding Distances Dataloader
-        _ , views_dist_loader = load_data(dataset=down_dataset, stage='down', finetune=finetune, n_views=3)
-        _ , gray_pair_dist_loader = load_data(down_dataset, ('gray', 1), stage='down', finetune=finetune, n_views=2, spe_pair=True) # ensure other sample is augmented
-        _ , hflip_pair_dist_loader = load_data(down_dataset, ('hflip', 1), stage='down', finetune=finetune, n_views=2, spe_pair=True) # ensure other sample is augmented
-        _ , rdm_rcrop_pair_dist_loader = load_data(down_dataset, ('crop', 1), stage='down', finetune=finetune, n_views=2, spe_pair=True)
+        _ , views_dist_loader = load_data(dataset=down_dataset, stage='down', finetune=False, n_views=3)
+        _ , gray_pair_dist_loader = load_data(down_dataset, ('gray', 1), stage='down', finetune=False, n_views=2, spe_pair=True) # ensure other sample is augmented
+        _ , hflip_pair_dist_loader = load_data(down_dataset, ('hflip', 1), stage='down', finetune=False, n_views=2, spe_pair=True) # ensure other sample is augmented
+        _ , rdm_rcrop_pair_dist_loader = load_data(down_dataset, ('crop', 1), stage='down', finetune=False, n_views=2, spe_pair=True)
+
+        # Jigsaw Dataloader
+        _ , jig_loader_16 = load_data(down_dataset, stage='down', jigsaw_ps=16)
+        _ , jig_loader_8 = load_data(down_dataset, stage='down', jigsaw_ps=8)
 
         # Init logger
         logger = create_logger(experiment_id)
@@ -467,7 +471,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
             else: is_vit = False
             
             # init wandb log
-            wandb.init(project=experiment_id)
+            wandb.init(entity='eliorb', project=experiment_id, name=modelnames[scores_idx])
             logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + 'Start of {}'.format(modelnames[scores_idx]))
             for epoch in range(train_epochs):
                 
@@ -481,7 +485,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                 if epoch % test_interval == 0:
                     
                     # Pretext test
-                    if pre_dataset != 'noise':
+                    if pre_dataset not in ['noise', 'fractal']:
                         result_pre, dist_pre = test(pre_type=pre_type, model=model, test_loader=pre_test, is_vit=is_vit, stage='Pre',
                                                     save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
 
@@ -509,6 +513,12 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                     result_down, dist_down = test(pre_type=pre_type, model=model, test_loader=down_test, classifier=classifier, is_vit=is_vit, stage='Down',
                                                   save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
 
+                    # Test on downstream jigsaw mixed data
+                    result_down_jig16, dist_down_jig16 = test(pre_type=pre_type, model=model, test_loader=jig_loader_16, classifier=classifier, is_vit=is_vit, stage='Down',
+                                                              save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
+                    result_down_jig8, dist_down_jig8 = test(pre_type=pre_type, model=model, test_loader=jig_loader_8, classifier=classifier, is_vit=is_vit, stage='Down',
+                                                  save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
+
                     # Views Embeddings distance 
                     result_3simclr_dist = eval_views_embed_dist(model=model, is_vit=is_vit, test_loader=views_dist_loader, 
                                                        save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
@@ -518,7 +528,13 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                                                        save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
                     result_pair_dist_rdm_crop = eval_views_embed_dist(model=model, is_vit=is_vit, test_loader=rdm_rcrop_pair_dist_loader, 
                                                        save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
+                    
                     wandb.log({
+                        "jig_16_acc":result_down_jig16,
+                        "dist_jig_16":dist_down_jig16,
+                        "jig_8_acc":result_down_jig8,
+                        "dist_jig_8":dist_down_jig8,
+                        
                         "dist_batch":dist_pre,
                         "dist_3_simclr":result_3simclr_dist,
                         "dist_gray":result_pair_dist_gray,
@@ -528,7 +544,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                     print('Pre: %.3f, Down: %.3f, Gray: %.3f, Hflip: %.3f, Rcrop: %.3f' % (dist_pre, dist_down, result_pair_dist_gray, result_pair_dist_hflip, result_pair_dist_rdm_crop))
 
                     # Save all results
-                    if pre_dataset != 'noise':
+                    if pre_dataset not in ['noise', 'fractal']:
                         scores[scores_idx].append([result_pre, result_bias, result_down, result_3simclr_dist])
                         distances.append([dist_pre, dist_down, result_pair_dist_gray, result_pair_dist_hflip, result_pair_dist_rdm_crop])
                     else :
@@ -604,6 +620,14 @@ Notes:
     # Call main
     scores = main(models2compare=models_to_compare, train_epochs=20, test_interval=2, pre_type='contrastive', 
                   pre_dataset='noise', finetune=True, save_models=False, experiment_id='noise', modelnames=model_names)
+    
+    # Fractal
+    fractal_path = load_fractal()
+    pre_train_cont, pre_test_cont = load_data(dataset='fractal', bs=64, n_views=2, noise_path=fractal_path, 
+                                                resize_image=False, shuffle_noise=True)
+    # Call main
+    scores = main(models2compare=models_to_compare, train_epochs=20, test_interval=2, pre_type='contrastive', 
+                  pre_dataset='fractal', finetune=True, save_models=False, experiment_id='fractal_tiny', modelnames=model_names)
 
 
 # Integrate Checkpoints?
