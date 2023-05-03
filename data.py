@@ -10,6 +10,7 @@ import torchvision.datasets as datasets
 from torchvision.datasets import CIFAR10, ImageNet, STL10, Cityscapes
 from torch.utils.data.sampler import SubsetRandomSampler
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
 dict = {0: 'tench, Tinca tinca',
     1: 'goldfish, Carassius auratus',
@@ -1073,6 +1074,7 @@ def simclr_aug(size, *args, norm):
 def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views=1, 
               spe_pair=False, aug=False,                                                                      # simclr
               pre_type='supervised', noise_path=None, fractal_path=None, resize_image=False, shuffle_noise=True, random_seed=42, # counterfact & noise & fractal
+              jigsaw_ps=None, # mix patches
               num_workers=4):
     # TODO: pin_memory = True
     cifar_norm = [(0.4914, 0.4822, 0.4465), (0.2471, 0.2435, 0.2616)]
@@ -1085,11 +1087,20 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=cifar_norm[0],
-                                 std=cifar_norm[1])]
+                                  std=cifar_norm[1])]
         transform = transforms.Compose(transform_array)
         
         if aug: # Augment the dataset with simCLR aug
             transform = transforms.Compose(simclr_aug(size=32, norm=cifar_norm))
+        
+        elif jigsaw_ps is not None: #TODO: Normalize each patch independently?
+            shuffle = ShufflePatches(jigsaw_ps)
+            
+            transform_array = [transforms.ToTensor(),
+                               shuffle,
+                               transforms.Normalize(mean=cifar_norm[0],
+                                                    std=cifar_norm[1])]
+            transform = transforms.Compose(transform_array)
 
         elif n_views > 1: # Apply SimCLR augmentations
             if not args_simclr: # standard aug for any nb of views
@@ -1121,7 +1132,7 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
 
             return train_loader, test_loader
     
-    elif dataset=='Imagenet':
+    elif dataset=='ImageNet': # TODO: load test manually
         transform_array += [
             transforms.Resize(256),
             transforms.CenterCrop(224),
@@ -1130,7 +1141,19 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
                                  std=ImageNet_norm[1])]
         transform = transforms.Compose(transform_array)
 
-        if n_views > 1: # Apply SimCLR augmentations
+        if aug: # Augment the dataset with simCLR aug
+            transform = transforms.Compose(simclr_aug(size=224, norm=cifar_norm))
+        
+        elif jigsaw_ps is not None:
+            shuffle = ShufflePatches(jigsaw_ps)
+            
+            transform_array = [transforms.ToTensor(),
+                               shuffle,
+                               transforms.Normalize(mean=ImageNet_norm[0],
+                                                    std=ImageNet_norm[1])]
+            transform = transforms.Compose(transform_array)
+
+        elif n_views > 1: # Apply SimCLR augmentations
             if not args_simclr:
                 transform_array = simclr_aug(size=224, norm=ImageNet_norm)
                 transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
@@ -1144,14 +1167,14 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
         
         # On downstream without finetuning, no need to load train and test sets separately, for more exhaustive test set, set train=True
         if stage=='down' and not finetune:
-            ds_test = ImageNet(root='./data', split='test', download=True, transform=transform)
+            ds_test = ImageNet(root='./data', split='val', transform=transform)
             test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=num_workers)
 
             return None, test_loader
         
         else:
-            ds_train = ImageNet(root='./data', split='train', download=True, transform=transform)
-            ds_test = ImageNet(root='./data', split='test', download=True, transform=transform)
+            ds_train = ImageNet(root='./data', split='train', transform=transform)
+            ds_test = ImageNet(root='./data', split='val', transform=transform)
             train_loader = DataLoader(ds_train, batch_size=bs, shuffle=True, num_workers=num_workers)
             test_loader = DataLoader(ds_test, batch_size=bs, shuffle=False, num_workers=num_workers)
 
@@ -1164,7 +1187,19 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
                                  std=ImageNet_norm[1])]
         transform = transforms.Compose(transform_array)
 
-        if n_views > 1: # Apply SimCLR augmentations
+        if aug: # Augment the dataset with simCLR aug
+            transform = transforms.Compose(simclr_aug(size=64, norm=cifar_norm))
+        
+        elif jigsaw_ps is not None:
+            shuffle = ShufflePatches(jigsaw_ps)
+            
+            transform_array = [transforms.ToTensor(),
+                               shuffle,
+                               transforms.Normalize(mean=ImageNet_norm[0],
+                                                    std=ImageNet_norm[1])]
+            transform = transforms.Compose(transform_array)
+
+        elif n_views > 1: # Apply SimCLR augmentations
             if not args_simclr:
                 transform_array = simclr_aug(size=64, norm=ImageNet_norm)
                 transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
@@ -1248,7 +1283,6 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
         return train_loader, val_loader, test_loader
 
 
-        
     elif dataset=='OTHER CUSTOM ONE':
         pass
 
@@ -1576,5 +1610,22 @@ def load_counterfact(size=10000, verbose=False):
     return df, to_pick
 
 
-if __name__ == '__main__':    
+class ShufflePatches(object):
+  def __init__(self, patch_size):
+    self.ps = patch_size
+
+  def __call__(self, x):
+    '''
+    Adapted from https://stackoverflow.com/questions/66962837/shuffle-patches-in-image-batch
+    '''
+    # divide the batch of images into non-overlapping patches
+    u = F.unfold(x, kernel_size=self.ps, stride=self.ps, padding=0)
+    # permute the patches of each image in the batch
+    u = torch.unsqueeze(u, 0)
+    pu = torch.cat([b_[:,torch.randperm(b_.shape[-1])] for b_ in u], dim=0)
+    # fold the permuted patches back together
+    f = F.fold(pu, x.shape[-2:], kernel_size=self.ps, stride=self.ps, padding=0)
+    return f 
+
+if __name__ == '__main__':        
     pass
