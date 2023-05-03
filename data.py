@@ -1049,6 +1049,10 @@ def simclr_aug(size, *args, norm):
     # Create custom list of augmentations and probabilities
     else:
         aug = []
+        
+        if size == 224: # If ImageNet, some images are not of same size so must apply resize for uniformity
+            aug += [transforms.Resize(256), 
+                    transforms.CenterCrop(224)]
 
         for des_aug in args:
             if des_aug[0] == 'hflip':
