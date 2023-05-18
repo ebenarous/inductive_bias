@@ -1151,7 +1151,9 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
         elif jigsaw_ps is not None:
             shuffle = ShufflePatches(jigsaw_ps)
             
-            transform_array = [transforms.ToTensor(),
+            transform_array = [transforms.Resize(256),
+                               transforms.CenterCrop(224),
+                               transforms.ToTensor(),
                                shuffle,
                                transforms.Normalize(mean=ImageNet_norm[0],
                                                     std=ImageNet_norm[1])]
@@ -1631,18 +1633,5 @@ class ShufflePatches(object):
     f = F.fold(pu, x.shape[-2:], kernel_size=self.ps, stride=self.ps, padding=0)
     return f 
 
-
-def okk(a=False, c=False):
-    if a:
-        print(1)
-    elif not a:
-        print(2)
-    
-    if c:
-        print(3)
-    elif not c:
-        print(4)
-
-if __name__ == '__main__':        
-    okk()
+if __name__ == '__main__':
     pass

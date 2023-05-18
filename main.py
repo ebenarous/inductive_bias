@@ -8,6 +8,7 @@ import copy
 import os
 import matplotlib.pyplot as plt
 import wandb
+import re
 
 import torch
 import torch.nn as nn
@@ -280,7 +281,7 @@ def eval_bias(model, loader, mapping,
     overlap = find_overlap(correct_shape.index, correct_texture.index)
     accuracy = (nb_shape + nb_texture - overlap) / len(loader.dataset)
     
-    msg = '[Epoch %d] Standard Bias Eval complete, Shape Bias: %.3f%% Acc: %.3f%%' % (epoch + 1, shape_bias, accuracy)
+    msg = '[Epoch %d] Standard Bias Eval complete, Shape Bias: %.3f%% Acc: %.3f%%' % (epoch + 1, shape_bias*100, accuracy*100)
     if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
     if verbose: print(msg)
 
@@ -365,7 +366,7 @@ def eval_bias_embed(model, loader, nb_neigh=5, metric='cosine', is_vit=False,
 
     model_bias_avg, model_acc_avg = np.average(model_results, axis=0, keepdims=True)[0]
 
-    msg = '[Epoch %d] Embedding Bias Eval complete, with %d neighbors - Shape Bias: %.3f%% Acc: %.3f%%' % (epoch + 1, nb_neigh, model_bias_avg, model_acc_avg)
+    msg = '[Epoch %d] Embedding Bias Eval complete, with %d neighbors - Shape Bias: %.3f%% Acc: %.3f%%' % (epoch + 1, nb_neigh, model_bias_avg*100, model_acc_avg*100)
     if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
     if verbose: print(msg)
     
@@ -411,7 +412,7 @@ def eval_views_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=Data
 
 def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset='CIFAR10', aug_pre=False,
             test_interval=5, finetune=False, down_dataset='CIFAR10', 
-            save_models=False, experiment_id='test1_elior', modelnames=[]):    
+            save_models=False, experiment_id='test1_elior', modelnames=[], checkpoint_names=None):
         
         """
         Returns: score_table: shape = (nb of models to compare, nb of logged epochs)
@@ -422,6 +423,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
         """
 
         assert len(models2compare) == len(modelnames), 'Provide a list of model names with same length as list of models to be tested'
+        if checkpoint_names is not None: assert len(models2compare) == len(checkpoint_names), 'Provide a list of model checkpoint names with same length as list of models to be tested'
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
         # Pre and Down Dataloader
@@ -461,11 +463,18 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
         scores_idx = 0
         scores_epochs = []
         for model in models2compare:
-            model.to(device)
-            
             scores.append([])
             distances = []
+            start_epoch = 0
 
+            if checkpoint_names is not None:
+                model.load_state_dict(torch.load(os.path.join('model', checkpoint_names[scores_idx])))
+                str_epoch = r'_e(\d+)_'
+                match = re.search(str_epoch, checkpoint_names[scores_idx])
+                if match:
+                    start_epoch = int(match.group(1))
+
+            model.to(device)
             try: model.fc # for model.fc / model.head 
             except: is_vit = True
             else: is_vit = False
@@ -473,7 +482,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
             # init wandb log
             wandb.init(entity='eliorb', project=experiment_id, name=modelnames[scores_idx])
             logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + 'Start of {}'.format(modelnames[scores_idx]))
-            for epoch in range(train_epochs):
+            for epoch in range(start_epoch, train_epochs+1):
                 
                 save_path = os.path.join('model', '{}_{}_pre.pth'.format(modelnames[scores_idx], epoch+1))
                 
@@ -491,7 +500,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
 
                     
                     # Shape bias with Geirhos method (1200 images in his custom set)
-                    if pre_dataset == 'Imagenet': # standard classification
+                    if pre_dataset == 'ImageNet': # standard classification
                         result_bias, result_acc = eval_bias(model=model, loader=geirhos_loader, mapping=ImageNetProbabilitiesTo16ClassesMapping(),
                                                             log=True, verbose=False, logger=logger, epoch=epoch, device=device)
                     else: # KNN classification of embeddings
