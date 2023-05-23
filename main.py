@@ -101,7 +101,7 @@ def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=
     return model
         
 def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier=nn.Module, test_loader=DataLoader, stage='Pre',
-         save_models=False, save_path=None, verbose=False, log=True, logger=None, device='cuda:0'):
+         save_models=False, save_path=None, verbose=False, log=True, logger=None, jig=False, device='cuda:0'):
     # if pretext objective was contrastive, modify model to adapt to downstream objective
     
     if pre_type == 'contrastive' and stage == 'Pre':
@@ -118,7 +118,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
 
                 # Compute distance between embeddings of same batch
                 dist_vec = pdist(h.detach().cpu().numpy(), metric='cosine')
-                avg_dist += np.sum(dist_vec) / len(dist_vec)
+                avg_dist += np.sum(dist_vec)
 
                 # Standard test classification procedure
                 loss, acc = info_nce_loss(out=out, temperature=0.5, mode='test', log=log, logger=logger)
@@ -128,7 +128,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
         # TODO: Is this correct? is the acc computed in InfoNCE logical?
         test_acc = 100. * test_acc / len(test_loader.dataset)
         test_loss /= len(test_loader.dataset)
-        avg_dist /= len(test_loader.dataset)
+        avg_dist /= (len(test_loader.dataset))
         
         msg = '[Epoch %d] %s-testing complete, Avg Loss: %.3f, Acc: %.3f%%' % (epoch + 1, stage, test_loss, test_acc)
         if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
@@ -166,7 +166,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
                 
                 # Compute distance between embeddings of same batch
                 dist_vec = pdist(h.detach().cpu().numpy(), metric='cosine')
-                avg_dist += np.sum(dist_vec) / len(dist_vec)
+                avg_dist += np.sum(dist_vec)
 
                 # Standard test classification procedure
                 test_loss += criterion(out, labels)
@@ -185,7 +185,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
             if verbose: print(msg)
             if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
 
-    wandb.log({'{}_acc'.format(stage):test_acc, '{}_loss'.format(stage):test_loss})
+    if not jig: wandb.log({'{}_acc'.format(stage):test_acc, '{}_loss'.format(stage):test_loss})
     return test_acc, avg_dist
 
 def down_finetune(epoch, finetune_epochs=5, pre_type='supervised', train_loader=DataLoader, 
@@ -395,7 +395,7 @@ def eval_views_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=Data
                 mean_dist = norm_calc(tens=h, type='euclidean', div=div)
                 avg_dist += mean_dist '''
                 dist_vec = pdist(h.detach().cpu().numpy(), metric='cosine')
-                avg_dist += np.sum(dist_vec) / len(dist_vec)
+                avg_dist += np.sum(dist_vec)
     avg_dist /= len(test_loader.dataset)
 
     msg = '[Epoch %d] Pair embeddings distance testing complete, Avg Distance: %.3f' % (epoch + 1, avg_dist)
@@ -473,6 +473,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                 match = re.search(str_epoch, checkpoint_names[scores_idx])
                 if match:
                     start_epoch = int(match.group(1))
+                logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + 'Loaded model: {} at epoch: {}'.format(checkpoint_names[scores_idx], start_epoch))
 
             model.to(device)
             try: model.fc # for model.fc / model.head 
@@ -524,9 +525,9 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
 
                     # Test on downstream jigsaw mixed data
                     result_down_jig16, dist_down_jig16 = test(pre_type=pre_type, model=model, test_loader=jig_loader_16, classifier=classifier, is_vit=is_vit, stage='Down',
-                                                              save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
+                                                              save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device, jig=True)
                     result_down_jig8, dist_down_jig8 = test(pre_type=pre_type, model=model, test_loader=jig_loader_8, classifier=classifier, is_vit=is_vit, stage='Down',
-                                                  save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
+                                                  save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device, jig=True)
 
                     # Views Embeddings distance 
                     result_3simclr_dist = eval_views_embed_dist(model=model, is_vit=is_vit, test_loader=views_dist_loader, 

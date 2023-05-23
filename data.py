@@ -1355,9 +1355,13 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
         indices = list(range(dataset_size))
         test_size = 0.1
         split = int(np.floor(test_size * dataset_size))
-        if shuffle_noise :
+        if shuffle_noise:
             np.random.seed(random_seed)
             np.random.shuffle(indices)
+            if noise_path == 'shaders21k_stylegan':
+                indices = indices[:105000]
+                split = int(np.floor(test_size * len(indices)))
+                
         train_indices, val_indices = indices[split:], indices[:split]
 
 
@@ -1538,14 +1542,18 @@ def load_noise(*args):
         'dead_leaves-oriented',
         'dead_leaves-mixed',
         'dead_leaves-textures',
+
         'stat-spectrum',
         'stat-wmm',
         'stat-spectrum_color',
         'stat-spectrum_color_wmm',
+
         'stylegan-random',
         'stylegan-highfreq',
         'stylegan-sparse',
         'stylegan-oriented',
+        'shaders21k_stylegan',
+
         'feature_vis-random',
         'feature_vis-dead_leaves']
     else:
