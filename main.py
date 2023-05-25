@@ -68,7 +68,7 @@ def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=
         optimizer = optim.Adam(model.parameters(), lr=pre_lr)
         train_acc = 0
         model.train()
-        for i, (im_x, im_y) in enumerate(train_loader):
+        for i, ((im_x, im_y), _) in enumerate(train_loader): # adapted to loaders that include labels, if loader does not have labels, replace with "i, (im_x, im_y)"
             optimizer.zero_grad()
             inputs = torch.cat([im_x, im_y], dim=0).to(device)
             out = model(inputs)
@@ -112,7 +112,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
 
         model.eval()
         with torch.no_grad():
-            for i, (im_x, im_y) in enumerate(test_loader):
+            for i, ((im_x, im_y), _) in enumerate(test_loader): # adapted to loaders that include labels, if loader does not have labels, replace with "i, (im_x, im_y)"
                 inputs = torch.cat([im_x, im_y], dim=0).to(device)
                 h, out = model(inputs, return_both=True) # used to be out = model(inputs)
 
@@ -128,7 +128,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
         # TODO: Is this correct? is the acc computed in InfoNCE logical?
         test_acc = 100. * test_acc / len(test_loader.dataset)
         test_loss /= len(test_loader.dataset)
-        avg_dist /= (len(test_loader.dataset))
+        avg_dist /= len(test_loader.dataset)
         
         msg = '[Epoch %d] %s-testing complete, Avg Loss: %.3f, Acc: %.3f%%' % (epoch + 1, stage, test_loss, test_acc)
         if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
@@ -389,11 +389,7 @@ def eval_views_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=Data
             inputs = torch.cat([view for view in inputs], dim=0).to(device) # won't work if loader does not load 2+ views
             out = model(inputs, return_embed=True)
 
-            div = ((nb_views-1) * ((nb_views-1) + 1)) / 2
-            for h in out.chunk(batch_size, dim=0):
-                '''# TODO: cosine similarity
-                mean_dist = norm_calc(tens=h, type='euclidean', div=div)
-                avg_dist += mean_dist '''
+            for h in out.reshape(nb_views, batch_size, -1).transpose(0, 1):
                 dist_vec = pdist(h.detach().cpu().numpy(), metric='cosine')
                 avg_dist += np.sum(dist_vec)
     avg_dist /= len(test_loader.dataset)

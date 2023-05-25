@@ -1049,6 +1049,7 @@ def simclr_aug(size, *args, norm):
     # Create custom list of augmentations and probabilities
     else:
         aug = []
+        args = args[0]
         
         if size == 224: # If ImageNet, some images are not of same size so must apply resize for uniformity
             aug += [transforms.Resize(256), 
@@ -1112,7 +1113,9 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
                 transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
             elif spe_pair: # custom aug for 2 views of (non-aug, aug) combinaiton
                 spe_transform_array = simclr_aug(32, args_simclr, norm=cifar_norm)
-                transform = ContrastiveTransformations(transforms.Compose(transform_array),
+                transform = ContrastiveTransformations(transforms.Compose([transforms.ToTensor(),
+                                                                           transforms.Normalize(mean=cifar_norm[0],
+                                                                                                std=cifar_norm[1])]),
                                                        spe_transforms=transforms.Compose(spe_transform_array))
             else: # custom aug for any nb of views
                 transform_array = simclr_aug(32, args_simclr, norm=cifar_norm)
