@@ -1,5 +1,6 @@
 from PIL import Image
 from time import sleep
+import cv2
 import numpy as np
 import os
 from torchvision import transforms
@@ -1024,27 +1025,43 @@ class ContrastiveTransformations:
         if self.spe_transforms is None: return [self.base_transforms(x) for i in range(self.n_views)] # return n_views versions of an image following base_transforms
         else: return [self.base_transforms(x), self.spe_transforms(x)] # return only pair of [base_transforms, specific_transforms] augmented image
 
-def simclr_aug(size, *args, norm):
+def simclr_aug(size, *args, norm, bilateral=False):
     '''
-    args of form:  (aug1, p1), (aug2, p2), (aug3, p3), ... 
-    Note - RandomResizedCrop & GaussianBlur do not have p as parameter, must pass:  (aug, None)
+    args of form:  
+        (aug1, params1), (aug2, params2), (aug3, params3), ... 
+    Note:
+        RandomResizedCrop & GaussianBlur do not have p as parameter, must pass:  (aug, None)
+        Bilateral filter takes three parameters, must pass: ('bilateral', diameter, sigma_color, sigma_space)
     Possible examples:
-        (hflip, p)
-        (crop, None)
-        (c_jitter, p)
-        (gray, p)
-        (g_blur, None)
+        ('hflip', p)
+        ('crop', None)
+        ('c_jitter', p)
+        ('gray', p)
+        ('bilateral', diameter, sigma_color, sigma_space)
+        ('g_blur', None)
     '''
     # Return standard simCLR augmentations
     if not args:
-
-        return [transforms.RandomHorizontalFlip(),
-                transforms.RandomResizedCrop(size=size),
-                transforms.RandomApply([transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.1)], p=0.8),
-                transforms.RandomGrayscale(p=0.2),
-                transforms.GaussianBlur(kernel_size=9),
-                transforms.ToTensor(),
-                transforms.Normalize(norm[0], norm[1]),]
+   
+        # Use Bilateral filtering
+        if bilateral:
+            return [transforms.RandomHorizontalFlip(),
+                    transforms.RandomResizedCrop(size=size),
+                    transforms.RandomApply([transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.1)], p=0.8),
+                    transforms.RandomGrayscale(p=0.2),
+                    BilateralFilterTransform(d=9, sigma_color=125, sigma_space=125),
+                    transforms.ToTensor(),
+                    transforms.Normalize(norm[0], norm[1]),]
+        
+        # Use Gaussian blurring
+        else: 
+            return [transforms.RandomHorizontalFlip(),
+                    transforms.RandomResizedCrop(size=size),
+                    transforms.RandomApply([transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.1)], p=0.8),
+                    transforms.RandomGrayscale(p=0.2),
+                    transforms.GaussianBlur(kernel_size=9),
+                    transforms.ToTensor(),
+                    transforms.Normalize(norm[0], norm[1]),]
    
     # Create custom list of augmentations and probabilities
     else:
@@ -1068,6 +1085,9 @@ def simclr_aug(size, *args, norm):
             elif des_aug[0] == 'gray':
                 aug += [transforms.RandomGrayscale(p=des_aug[1])]
 
+            elif des_aug[0] == 'bilateral':
+                aug += [BilateralFilterTransform(d=des_aug[1], sigma_color=des_aug[2], sigma_space=des_aug[3])]
+
             elif des_aug[0] == 'g_blur':
                 aug += [transforms.GaussianBlur(kernel_size=9)]
         
@@ -1080,6 +1100,7 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
               spe_pair=False, aug=False,                                                                      # simclr
               pre_type='supervised', noise_path=None, fractal_path=None, resize_image=False, shuffle_noise=True, random_seed=42, # counterfact & noise & fractal
               jigsaw_ps=None, # mix patches
+              bilateral=False, # replace gauss blur by bilateral filtering
               num_workers=4):
     # TODO: pin_memory = True
     cifar_norm = [(0.4914, 0.4822, 0.4465), (0.2471, 0.2435, 0.2616)]
@@ -1096,7 +1117,7 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
         transform = transforms.Compose(transform_array)
         
         if aug: # Augment the dataset with simCLR aug
-            transform = transforms.Compose(simclr_aug(size=32, norm=cifar_norm))
+            transform = transforms.Compose(simclr_aug(size=32, norm=cifar_norm, bilateral=bilateral))
         
         elif jigsaw_ps is not None: #TODO: Normalize each patch independently?
             shuffle = ShufflePatches(jigsaw_ps)
@@ -1149,7 +1170,7 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
         transform = transforms.Compose(transform_array)
 
         if aug: # Augment the dataset with simCLR aug
-            transform = transforms.Compose(simclr_aug(size=224, norm=ImageNet_norm))
+            transform = transforms.Compose(simclr_aug(size=224, norm=ImageNet_norm, bilateral=bilateral))
         
         elif jigsaw_ps is not None:
             shuffle = ShufflePatches(jigsaw_ps)
@@ -1197,7 +1218,7 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
         transform = transforms.Compose(transform_array)
 
         if aug: # Augment the dataset with simCLR aug
-            transform = transforms.Compose(simclr_aug(size=64, norm=ImageNet_norm))
+            transform = transforms.Compose(simclr_aug(size=64, norm=ImageNet_norm, bilateral=bilateral))
         
         elif jigsaw_ps is not None:
             shuffle = ShufflePatches(jigsaw_ps)
@@ -1643,6 +1664,26 @@ class ShufflePatches(object):
     # fold the permuted patches back together
     f = F.fold(pu, x.shape[-2:], kernel_size=self.ps, stride=self.ps, padding=0)
     return f 
+
+
+class BilateralFilterTransform(object):
+    def __init__(self, d, sigma_color, sigma_space):
+        self.d = d
+        self.sigma_color = sigma_color
+        self.sigma_space = sigma_space
+
+    def __call__(self, img):
+        # Convert PIL image to OpenCV format (numpy array)
+        img_np = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        
+        # Apply bilateral filter
+        filtered_img = cv2.bilateralFilter(img_np, self.d, self.sigma_color, self.sigma_space)
+        
+        # Convert back to PIL image
+        filtered_img = cv2.cvtColor(filtered_img, cv2.COLOR_BGR2RGB)
+        filtered_img = Image.fromarray(filtered_img)
+        
+        return filtered_img
 
 if __name__ == '__main__':
     pass

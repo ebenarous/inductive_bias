@@ -10,3 +10,4 @@ matplotlib
 tqdm
 openpyxl
 torchsummary
+opencv-python
