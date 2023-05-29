@@ -118,7 +118,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
 
                 # Compute distance between embeddings of same batch
                 dist_vec = pdist(h.detach().cpu().numpy(), metric='cosine')
-                avg_dist += np.sum(dist_vec)
+                avg_dist += np.sum(dist_vec) # TODO: need to divide by 2 because 2 views?
 
                 # Standard test classification procedure
                 loss, acc = info_nce_loss(out=out, temperature=0.5, mode='test', log=log, logger=logger)
@@ -128,7 +128,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
         # TODO: Is this correct? is the acc computed in InfoNCE logical?
         test_acc = 100. * test_acc / len(test_loader.dataset)
         test_loss /= len(test_loader.dataset)
-        avg_dist /= len(test_loader.dataset)
+        avg_dist /= len(test_loader.dataset) # * 2 because of 2 views processed ? doesnt scale linearly though
         
         msg = '[Epoch %d] %s-testing complete, Avg Loss: %.3f, Acc: %.3f%%' % (epoch + 1, stage, test_loss, test_acc)
         if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
@@ -464,7 +464,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
             start_epoch = 0
 
             if checkpoint_names is not None:
-                model.load_state_dict(torch.load(os.path.join('model', checkpoint_names[scores_idx])))
+                model.load_state_dict(torch.load(os.path.join('model', checkpoint_names[scores_idx] + '.pth')))
                 str_epoch = r'_e(\d+)_'
                 match = re.search(str_epoch, checkpoint_names[scores_idx])
                 if match:
@@ -584,6 +584,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
             ### Specific distance analysis, temp so not in visualize
 
             scores_idx += 1
+            wandb.finish()
 
         score_table = pd.DataFrame(scores, index=modelnames, columns=scores_epochs)
 
