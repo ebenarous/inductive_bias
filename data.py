@@ -1627,6 +1627,20 @@ def load_geirhos_transfer_pre(conflict_only=False):
     
     return paths
 
+def load_geirhos_edge_silhouette(type='edge'):
+    paths = []
+    type_dict = {
+        'edge' : 'edges',
+        'sil'  : 'filled-silhouettes'}
+    
+    for category in os.listdir(os.path.join("geirhos", type_dict[type])):
+        if category == ".DS_Store":
+            continue
+        for img in os.listdir(os.path.join("geirhos", type_dict[type], category)):
+            paths.append(os.path.join("geirhos", type_dict[type], category, img))
+    
+    return paths
+
 def load_counterfact(size=10000, verbose=False):
     avail_sizes = [10, 500, 2500, 10000]
 

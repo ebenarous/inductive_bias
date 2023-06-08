@@ -24,7 +24,7 @@ from sot_modif_resnet import modify_resnet_model
 from models import *
 from vit_models import ViT
 
-from data import load_geirhos_transfer_pre, load_data, MyDataset, load_noise, load_fractal
+from data import load_geirhos_transfer_pre, load_data, MyDataset, load_noise, load_fractal, load_geirhos_edge_silhouette
 from geirhos.probabilities_to_decision import ImageNetProbabilitiesTo16ClassesMapping
 from loss import info_nce_loss
 from utils import create_logger, visualize, norm_calc, find_overlap, remove_int
@@ -373,6 +373,78 @@ def eval_bias_embed(model, loader, nb_neigh=5, metric='cosine', is_vit=False,
     wandb.log({'shape bias knn':shape_bias})
     return model_bias_avg, model_acc_avg
 
+def eval_edge_sil_embed(model, loader, nb_neigh=5, metric='cosine', is_vit=False,
+                        log=True, verbose=False, logger=None, epoch=0, device='cuda:0', type='Edge'):
+    embed_map = {
+        "knife"    : 0, 
+        "keyboard" : 1, 
+        "elephant" : 2, 
+        "bicycle"  : 3, 
+        "airplane" : 4,
+        "clock"    : 5, 
+        "oven"     : 6, 
+        "chair"    : 7, 
+        "bear"     : 8, 
+        "boat"     : 9, 
+        "cat"      : 10, 
+        "bottle"   : 11,
+        "truck"    : 12, 
+        "car"      : 13,
+        "bird"     : 14, 
+        "dog"      : 15
+    }
+    
+    model_results = np.ones(shape=(nb_neigh, 1))
+    model.eval()
+    for it in range(1, nb_neigh+1):
+        results = []
+        gt = []
+        embeddings = []
+        with torch.no_grad():
+            # collect all embeddings
+            for img, path in loader:
+                labels = pd.Series(path)
+                labels = labels.str.split("/").str.get(-1)
+                labels = pd.DataFrame({'labels': labels})
+                labels['labels'] = labels['labels'].str.replace(r'\.png$', '', regex=True).apply(remove_int)
+                
+                gt.append(labels.replace(embed_map).to_numpy())
+                embeddings.append(torch.squeeze(model(img.to(device), return_embed=True)).detach().cpu().numpy())
+
+            embeddings = np.vstack(embeddings)
+            gt = np.vstack(gt)
+
+            # eval with KNN
+            for idx in range(len(embeddings)):
+                train_embeddings = np.delete(np.asarray(embeddings), idx, axis=0)
+                test_embedding = np.expand_dims(embeddings[idx], axis=0)
+                train_gt = np.delete(gt, idx, axis=0)
+                test_gt = gt[idx]
+
+                # Fit for all but this embedding
+                neigh = KNN(n_neighbors=it, metric=metric)
+                neigh.fit(X=train_embeddings, y=train_gt.ravel())
+                
+                # Predict on this embedding
+                pred = np.squeeze(neigh.predict(test_embedding))
+
+                results.append(np.array([pred, test_gt.item()]))
+
+        results = pd.DataFrame(results, columns=["Predicted", "Ground Truth"])
+        correct = results.loc[results['Predicted'] == results['Ground Truth']]
+        accuracy = len(correct.index) / len(loader.dataset)
+
+        model_results[it-1] = accuracy
+
+    model_acc_avg = np.average(model_results, axis=0, keepdims=True).item()
+
+    msg = '[Epoch %d] %s Embedding Eval complete, with %d neighbors - Acc: %.3f%%' % (epoch + 1, type, nb_neigh, model_acc_avg*100)
+    if log: logger.info(time.strftime('%Y-%m-%d-%H-%M') + ' - ' + msg)
+    if verbose: print(msg)
+    
+    wandb.log({'{} knn'.format(type) : accuracy})
+    return model_acc_avg
+
 def eval_views_embed_dist(epoch, model=nn.Module, is_vit=False, test_loader=DataLoader, 
                         save_models=False, save_path=None, verbose=False, log=True, logger=None, device='cuda:0'):
     # Testing the encoder with embedding distances
@@ -426,13 +498,23 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
         pre_train, pre_test = load_data(dataset=pre_dataset, stage='pre', finetune=finetune, aug=aug_pre) # TODO: cifar train with simCLR aug
         down_train, down_test = load_data(dataset=down_dataset, stage='down', finetune=finetune)
         
-        # Custom Geirhos Dataloader
+        # Custom Geirhos Dataloaders
         bias_data_path = load_geirhos_transfer_pre(conflict_only=True)
+        edge_data_path = load_geirhos_edge_silhouette(type='edge')
+        sil_data_path = load_geirhos_edge_silhouette(type='sil')
         geirhos_bs = 256 if device=='cuda:0' else 1
-        geirhos_ds = MyDataset(bias_data_path, transforms=transforms.Compose([transforms.Resize(32),
+        geirhos_bias_ds = MyDataset(bias_data_path, transforms=transforms.Compose([transforms.Resize(32),
                                                                              transforms.ToTensor(),
-                                                                             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])) #TODO: downsize to 32 because pretrain cifar
-        geirhos_loader = torch.utils.data.DataLoader(geirhos_ds, batch_size=geirhos_bs, num_workers=0, shuffle=False, pin_memory=False)
+                                                                             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))]))
+        geirhos_edge_ds = MyDataset(edge_data_path, transforms=transforms.Compose([transforms.Resize(32),
+                                                                             transforms.ToTensor(),
+                                                                             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))]))
+        geirhos_sil_ds = MyDataset(sil_data_path, transforms=transforms.Compose([transforms.Resize(32),
+                                                                             transforms.ToTensor(),
+                                                                             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))]))
+        geirhos_loader = torch.utils.data.DataLoader(geirhos_bias_ds, batch_size=geirhos_bs, num_workers=0, shuffle=False, pin_memory=False)
+        geirhos_edge_loader = torch.utils.data.DataLoader(geirhos_edge_ds, batch_size=geirhos_bs, num_workers=0, shuffle=False, pin_memory=False)
+        geirhos_sil_loader = torch.utils.data.DataLoader(geirhos_sil_ds, batch_size=geirhos_bs, num_workers=0, shuffle=False, pin_memory=False)
 
         # Pair Embedding Distances Dataloader
         _ , views_dist_loader = load_data(dataset=down_dataset, stage='down', finetune=False, n_views=3)
@@ -503,7 +585,11 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                     else: # KNN classification of embeddings
                         result_bias, result_acc = eval_bias_embed(model=model, loader=geirhos_loader, nb_neigh=5, metric='cosine',
                                                                   is_vit=is_vit, log=True, verbose=False, logger=logger, epoch=epoch, device=device)
-                        
+                        edge_acc = eval_edge_sil_embed(model=model, loader=geirhos_edge_loader, nb_neigh=5, metric='cosine', 
+                                                       is_vit=is_vit, log=True, verbose=False, logger=logger, epoch=epoch, device=device, type='Edge')
+                        sil_acc = eval_edge_sil_embed(model=model, loader=geirhos_sil_loader, nb_neigh=5, metric='cosine', 
+                                                       is_vit=is_vit, log=True, verbose=False, logger=logger, epoch=epoch, device=device, type='Sil')
+
                     # Downstream
                     out_features = class_name_2_nb_classes[down_dataset]
                     if not is_vit: classifier = nn.Linear(in_features=model.fc.in_features, out_features=out_features).to(device)
