@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 import torch
 import pandas as pd
 import torchvision.datasets as datasets
-from torchvision.datasets import CIFAR10, ImageNet, STL10, Cityscapes
+from torchvision.datasets import CIFAR10, ImageNet, STL10, Cityscapes, ImageFolder
 from torch.utils.data.sampler import SubsetRandomSampler
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 import torch.nn.functional as F
 
 dict = {0: 'tench, Tinca tinca',
@@ -1071,6 +1071,8 @@ def simclr_aug(size, *args, norm, bilateral=False):
         if size == 224: # If ImageNet, some images are not of same size so must apply resize for uniformity
             aug += [transforms.Resize(256), 
                     transforms.CenterCrop(224)]
+        elif size == 64:
+            aug += [transforms.Resize(size=(64, 64))]
 
         for des_aug in args:
             if des_aug[0] == 'hflip':
@@ -1316,6 +1318,55 @@ def load_data(dataset, *args_simclr, bs=64, stage='pre', finetune=False, n_views
     elif dataset=='OTHER CUSTOM ONE':
         pass
 
+    elif dataset=='ImageNetO':
+        transform_array += [
+            transforms.Resize(size=(64, 64)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=ImageNet_norm[0],
+                                 std=ImageNet_norm[1]),]
+
+        transform = transforms.Compose(transform_array)
+
+        if aug: # Augment the dataset with simCLR aug
+            transform = transforms.Compose(simclr_aug(size=64, norm=ImageNet_norm, bilateral=bilateral))
+        
+        elif jigsaw_ps is not None:
+            shuffle = ShufflePatches(jigsaw_ps)
+            
+            transform_array = [transforms.Resize(size=(64, 64)),
+                               transforms.ToTensor(),
+                               shuffle,
+                               transforms.Normalize(mean=ImageNet_norm[0],
+                                                    std=ImageNet_norm[1])]
+            transform = transforms.Compose(transform_array)
+
+        elif n_views > 1: # Apply SimCLR augmentations
+            if not args_simclr:
+                transform_array = simclr_aug(size=64, norm=ImageNet_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+            elif spe_pair: # test embed distance for specific pair of normal/augmented combinaiton
+                spe_transform_array = simclr_aug(64, args_simclr, norm=ImageNet_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views, 
+                                                       spe_transforms=transforms.Compose(spe_transform_array))
+            else: # custom set of augmentations
+                transform_array = simclr_aug(64, args_simclr, norm=ImageNet_norm)
+                transform = ContrastiveTransformations(transforms.Compose(transform_array), n_views=n_views)
+
+        dataset = ImageFolder(root='./data/imagenet-o', transform=transform)
+
+        # Split training and validation splits:
+        dataset_size = len(dataset)
+        train_size = int(0.7 * dataset_size)
+        val_size = dataset_size - train_size
+
+        # Split the dataset into training and validation sets
+        train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+
+        train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=num_workers, pin_memory=True)
+        test_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False, num_workers=num_workers, pin_memory=True)
+
+        return train_loader, test_loader
+    
     elif dataset=='counterfactual':
         if resize_image:
             transform_array.append(

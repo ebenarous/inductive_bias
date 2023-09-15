@@ -26,16 +26,16 @@ from vit_models import ViT
 
 from data import load_geirhos_transfer_pre, load_data, MyDataset, load_noise, load_fractal, load_geirhos_edge_silhouette
 from geirhos.probabilities_to_decision import ImageNetProbabilitiesTo16ClassesMapping
-from loss import info_nce_loss
+from loss import info_nce_loss, compute_saliency_map, canny_edge_detector, edge2blob, kl_divergence
 from utils import create_logger, visualize, norm_calc, find_overlap, remove_int
 
 
-def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=nn.Module, pre_lr=0.001,
+def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=nn.Module, pre_lr=0.001, saliency=False, saliency_weight=1,
                   log_interval=100, save_models=False, save_path=None, verbose=False, log=True, logger=None, device='cuda:0'):
     """
     Modify loss and optimizer inside function because that's not something we need to modify easily. Not project focus.
     """
-    logger.info('')
+    if log: logger.info('')
     if pre_type=='supervised':
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=pre_lr)
@@ -44,9 +44,20 @@ def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=
         model.train()
         for i, data in enumerate(train_loader):
             inputs, labels = data[0].to(device), data[1].to(device)
+            if saliency: inputs.requires_grad = True
             optimizer.zero_grad()
             out = model(inputs)
             loss = criterion(out, labels)
+            
+            # Apply saliency-guidance to loss
+            if saliency: 
+                saliency_maps = compute_saliency_map(outputs=out, model=model, input_images=inputs, embedding=False, normalized=True)
+                canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175)
+                saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0).to(device)
+                loss += saliency_weight * kl_divergence(P=saliency_gt, Q=saliency_maps, forward=True)
+                optimizer.zero_grad()
+                # TODO: forward better to teach more shape interpretation? ((forward-> mass seeker, reverse-> mode seeker))
+            
             loss.backward()
             optimizer.step()
 
@@ -71,11 +82,21 @@ def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=
         for i, ((im_x, im_y), _) in enumerate(train_loader): # adapted to loaders that include labels, if loader does not have labels, replace with "i, (im_x, im_y)"
             optimizer.zero_grad()
             inputs = torch.cat([im_x, im_y], dim=0).to(device)
-            out = model(inputs)
-            # need to separate again with .chunk(2) ?
+            if saliency: inputs.requires_grad = True
+            h = model(inputs, return_embed=True) # or leave after fc: out = model(inputs)
 
             # Apply InfoNCE loss
-            loss, acc = info_nce_loss(out=out, temperature=0.5, log=log, logger=logger)
+            loss, acc = info_nce_loss(out=h, temperature=0.5, log=log, logger=logger)
+            
+            # Apply saliency-guidance to loss
+            if saliency: 
+                saliency_maps = compute_saliency_map(outputs=h, model=model, input_images=inputs, embedding=True, normalized=True)
+                canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175)
+                saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0).to(device)
+                loss += saliency_weight * kl_divergence(P=saliency_gt, Q=saliency_maps, forward=True)
+                optimizer.zero_grad()
+                # TODO: forward better to teach more shape interpretation? ((forward-> mass seeker, reverse-> mode seeker))
+
             loss.backward()
             optimizer.step()
             train_acc += acc.item()
@@ -100,10 +121,12 @@ def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=
 
     return model
         
-def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier=nn.Module, test_loader=DataLoader, stage='Pre',
+def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier=nn.Module, test_loader=DataLoader, stage='Pre', saliency=False, saliency_weight=1,
          save_models=False, save_path=None, verbose=False, log=True, logger=None, jig=False, device='cuda:0'):
-    # if pretext objective was contrastive, modify model to adapt to downstream objective
     
+    grad_context = torch.no_grad() if not saliency else torch.enable_grad()
+
+    # if pretext objective was contrastive, modify model to adapt to downstream objective
     if pre_type == 'contrastive' and stage == 'Pre':
         # Remain in contrastive framework
         test_acc = 0
@@ -111,17 +134,27 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
         avg_dist = 0
 
         model.eval()
-        with torch.no_grad():
+        with grad_context:
             for i, ((im_x, im_y), _) in enumerate(test_loader): # adapted to loaders that include labels, if loader does not have labels, replace with "i, (im_x, im_y)"
                 inputs = torch.cat([im_x, im_y], dim=0).to(device)
-                h, out = model(inputs, return_both=True) # used to be out = model(inputs)
+                if saliency: inputs.requires_grad = True
+                h = model(inputs, return_embed=True) # or leave after fc: h, out = model(inputs, return_both=True)
 
                 # Compute distance between embeddings of same batch
                 dist_vec = pdist(h.detach().cpu().numpy(), metric='cosine')
                 avg_dist += np.sum(dist_vec) # TODO: need to divide by 2 because 2 views?
 
                 # Standard test classification procedure
-                loss, acc = info_nce_loss(out=out, temperature=0.5, mode='test', log=log, logger=logger)
+                loss, acc = info_nce_loss(out=h, temperature=0.5, mode='test', log=log, logger=logger)
+                
+                # Apply saliency-guidance to loss
+                if saliency: 
+                    saliency_maps = compute_saliency_map(outputs=h, model=model, input_images=inputs, embedding=True, normalized=True)
+                    canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175)
+                    saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0).to(device)
+                    loss += saliency_weight * kl_divergence(P=saliency_gt, Q=saliency_maps, forward=True)
+                    # TODO: forward better to teach more shape interpretation? ((forward-> mass seeker, reverse-> mode seeker))
+
                 test_acc += acc.item()
                 test_loss += loss.item()
             
@@ -153,10 +186,11 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
             else: model.head = nn.Identity()'''
             classifier.eval()
         model.eval()
-        with torch.no_grad():
+        with grad_context:
             for inputs, labels in test_loader:
                 inputs = inputs.to(device)
                 labels = labels.to(device)
+                if saliency: inputs.requires_grad = True
                 
                 if stage == 'Pre':
                     h, out = model(inputs, return_both=True)
@@ -170,6 +204,14 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
 
                 # Standard test classification procedure
                 test_loss += criterion(out, labels)
+                # Apply saliency-guidance to loss
+                if saliency: 
+                    saliency_maps = compute_saliency_map(outputs=out, model=model, input_images=inputs, embedding=False, normalized=True)
+                    canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175)
+                    saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0).to(device)
+                    test_loss += saliency_weight * kl_divergence(P=saliency_gt, Q=saliency_maps, forward=True)
+                    # TODO: forward better to teach more shape interpretation? ((forward-> mass seeker, reverse-> mode seeker))
+
                 pred = out.argmax(dim=1, keepdim=True)
                 test_correct += pred.eq(labels.view_as(pred)).sum().item() 
         test_acc = 100. * test_correct / len(test_loader.dataset)
@@ -189,7 +231,7 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
     return test_acc, avg_dist
 
 def down_finetune(epoch, finetune_epochs=5, pre_type='supervised', train_loader=DataLoader, 
-                  model=nn.Module, is_vit=False, classifier=nn.Module, down_lr=0.001,
+                  model=nn.Module, is_vit=False, classifier=nn.Module, down_lr=0.001, saliency=False, saliency_weight=1,
                   log_interval=100, save_models=False, save_path=None, verbose=False, log=True, logger=None, device='cuda:0'):
     '''if pre_type=='supervised':
         # modify fc dimensions and finetune with standard training procedure
@@ -213,6 +255,7 @@ def down_finetune(epoch, finetune_epochs=5, pre_type='supervised', train_loader=
         train_loss = 0
         for i, data in enumerate(train_loader):
             inputs, labels = data[0].to(device), data[1].to(device)
+            if saliency: inputs.requires_grad = True
             optimizer.zero_grad()
             
             '''if pre_type=='supervised':
@@ -222,6 +265,15 @@ def down_finetune(epoch, finetune_epochs=5, pre_type='supervised', train_loader=
             
             out = classifier(model(inputs, return_embed=True))
             loss = criterion(out, labels)
+            # Apply saliency-guidance to loss
+            if saliency: 
+                saliency_maps = compute_saliency_map(outputs=out, model=model, input_images=inputs, embedding=False, normalized=True)
+                canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175)
+                saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0).to(device)
+                loss += saliency_weight * kl_divergence(P=saliency_gt, Q=saliency_maps, forward=True)
+                optimizer.zero_grad()
+                # TODO: forward better to teach more shape interpretation? ((forward-> mass seeker, reverse-> mode seeker))
+
             loss.backward()
             optimizer.step()
 
@@ -536,6 +588,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
             'CIFAR100' : 100,
             'STL10'    : 10,
             'tiny'     : 200,
+            'ImageNetO': 200,
         }
         scores = []
         scores_idx = 0
@@ -566,7 +619,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                 save_path = os.path.join('model', '{}_{}_pre.pth'.format(modelnames[scores_idx], epoch+1))
                 
                 # Train on pretext task
-                model = pretext_train(pre_type=pre_type, train_loader=pre_train, model=model, pre_lr=0.001,
+                model = pretext_train(pre_type=pre_type, train_loader=pre_train, model=model, pre_lr=0.001, saliency=False, saliency_weight=1,
                                       log_interval=100, save_models=save_models, save_path=save_path, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
                 
                 # Test
@@ -574,7 +627,7 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
                     
                     # Pretext test
                     if pre_dataset not in ['noise', 'fractal']:
-                        result_pre, dist_pre = test(pre_type=pre_type, model=model, test_loader=pre_test, is_vit=is_vit, stage='Pre',
+                        result_pre, dist_pre = test(pre_type=pre_type, model=model, test_loader=pre_test, is_vit=is_vit, stage='Pre', saliency=False, saliency_weight=1,
                                                     save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
 
                     
@@ -597,12 +650,12 @@ def main(models2compare=[], train_epochs=10, pre_type='supervised', pre_dataset=
 
                     # Finetune on downstream task
                     if finetune:
-                        down_finetune(model=model, finetune_epochs=5, pre_type=pre_type, train_loader=down_train, 
-                                      down_lr=0.001, classifier=classifier, is_vit=is_vit,
+                        down_finetune(model=model, finetune_epochs=5, pre_type=pre_type, train_loader=down_train, saliency=False, saliency_weight=1,
+                                      down_lr=0.001, classifier=classifier, is_vit=is_vit, 
                                       log_interval=100, save_models=False, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
                 
                     # Test on downstream task
-                    result_down, dist_down = test(pre_type=pre_type, model=model, test_loader=down_test, classifier=classifier, is_vit=is_vit, stage='Down',
+                    result_down, dist_down = test(pre_type=pre_type, model=model, test_loader=down_test, classifier=classifier, is_vit=is_vit, stage='Down',saliency=False, saliency_weight=1,
                                                   save_models=save_models, save_path=None, verbose=False, log=True, logger=logger, epoch=epoch, device=device)
 
                     # Test on downstream jigsaw mixed data
