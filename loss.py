@@ -110,14 +110,14 @@ def gaussian_kernel(size: int, sigma: float):
     kernel /= kernel.sum()
     return kernel
 
-def edge2blob(tensor_batch, kernel_size=3, sigma=1.0):
+def edge2blob(tensor_batch, kernel_size=3, sigma=1.0, device='cpu'):
     """Apply Gaussian kernel to pixels with value 1 using convolution for a batch of tensors."""
     # Add one dimension for channel to use F.conv2d
     tensor_batch = tensor_batch[:, None, ...]
     
     kernel = gaussian_kernel(kernel_size, sigma)
     # Add two dimensions for in_channels and out_channels to use F.conv2d
-    kernel = kernel[None, None, ...]
+    kernel = kernel[None, None, ...].to(device)
     
     # Apply convolution without padding
     padding = kernel_size // 2

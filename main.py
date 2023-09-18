@@ -52,8 +52,8 @@ def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=
             # Apply saliency-guidance to loss
             if saliency: 
                 saliency_maps = compute_saliency_map(outputs=out, model=model, input_images=inputs, embedding=False, normalized=True)
-                canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175)
-                saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0).to(device)
+                canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175).to(device)
+                saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0, device=device)
                 loss += saliency_weight * kl_divergence(P=saliency_gt, Q=saliency_maps, forward=True)
                 optimizer.zero_grad()
                 # TODO: forward better to teach more shape interpretation? ((forward-> mass seeker, reverse-> mode seeker))
@@ -91,8 +91,8 @@ def pretext_train(epoch, pre_type='supervised',  train_loader=DataLoader, model=
             # Apply saliency-guidance to loss
             if saliency: 
                 saliency_maps = compute_saliency_map(outputs=h, model=model, input_images=inputs, embedding=True, normalized=True)
-                canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175)
-                saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0).to(device)
+                canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175).to(device)
+                saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0, device=device)
                 loss += saliency_weight * kl_divergence(P=saliency_gt, Q=saliency_maps, forward=True)
                 optimizer.zero_grad()
                 # TODO: forward better to teach more shape interpretation? ((forward-> mass seeker, reverse-> mode seeker))
@@ -150,8 +150,8 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
                 # Apply saliency-guidance to loss
                 if saliency: 
                     saliency_maps = compute_saliency_map(outputs=h, model=model, input_images=inputs, embedding=True, normalized=True)
-                    canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175)
-                    saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0).to(device)
+                    canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175).to(device)
+                    saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0, device=device)
                     loss += saliency_weight * kl_divergence(P=saliency_gt, Q=saliency_maps, forward=True)
                     # TODO: forward better to teach more shape interpretation? ((forward-> mass seeker, reverse-> mode seeker))
 
@@ -207,8 +207,8 @@ def test(epoch, pre_type='supervised', model=nn.Module, is_vit=False, classifier
                 # Apply saliency-guidance to loss
                 if saliency: 
                     saliency_maps = compute_saliency_map(outputs=out, model=model, input_images=inputs, embedding=False, normalized=True)
-                    canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175)
-                    saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0).to(device)
+                    canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175).to(device)
+                    saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0, device=device)
                     test_loss += saliency_weight * kl_divergence(P=saliency_gt, Q=saliency_maps, forward=True)
                     # TODO: forward better to teach more shape interpretation? ((forward-> mass seeker, reverse-> mode seeker))
 
@@ -268,8 +268,8 @@ def down_finetune(epoch, finetune_epochs=5, pre_type='supervised', train_loader=
             # Apply saliency-guidance to loss
             if saliency: 
                 saliency_maps = compute_saliency_map(outputs=out, model=model, input_images=inputs, embedding=False, normalized=True)
-                canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175)
-                saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0).to(device)
+                canny_edges = canny_edge_detector(input_images=inputs, low_threshold=75, high_threshold=175).to(device)
+                saliency_gt = edge2blob(canny_edges, kernel_size=5, sigma=2.0, device=device)
                 loss += saliency_weight * kl_divergence(P=saliency_gt, Q=saliency_maps, forward=True)
                 optimizer.zero_grad()
                 # TODO: forward better to teach more shape interpretation? ((forward-> mass seeker, reverse-> mode seeker))
