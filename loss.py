@@ -129,6 +129,9 @@ def edge2blob(tensor_batch, kernel_size=3, sigma=1.0):
     # Remove the added channel dimension
     result = result[:, 0, ...]
     
+    # Normalize
+    result = result / result.sum(dim=[1, 2], keepdim=True)
+    
     return result
 
 def kl_divergence(P, Q, forward=True):
